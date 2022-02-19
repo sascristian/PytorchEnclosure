@@ -1,0 +1,23 @@
+name: linux-binary
+
+on:
+  workflow_call:
+    inputs:
+      build-environment:
+        required: true
+        type: string
+      test-matrix:
+        required: true
+        type: string
+      docker-image:
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      matrix: ${{ fromJSON(inputs.test-matrix) }}
+      fail-fast: false
+    runs-on: [self-hosted, linux.2xlarge]
+    steps:
+      - run: echo foo

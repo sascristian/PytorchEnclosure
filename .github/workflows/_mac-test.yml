@@ -1,0 +1,87 @@
+name: mac-test
+
+on:
+  workflow_call:
+    inputs:
+      build-environment:
+        required: true
+        type: string
+      test-matrix:
+        required: true
+        type: string
+
+env:
+  IN_CI: 1 # TODO delete in favor of GITHUB_ACTIONS
+  IS_GHA: 1 # TODO delete in favor of GITHUB_ACTIONS
+
+# For setup-miniconda, see https://github.com/conda-incubator/setup-miniconda/issues/179
+defaults:
+  run:
+    shell: bash -e -l {0}
+
+jobs:
+  test:
+    strategy:
+      matrix: ${{ fromJSON(inputs.test-matrix) }}
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    env:
+      BUILD_ENVIRONMENT: ${{ inputs.build-environment }}
+      COMPACT_JOB_NAME: ${{ inputs.build-environment }}
+      JOB_BASE_NAME: ${{ inputs.build_environment }}-test
+      TEST_CONFIG: ${{ matrix.config }}
+      SHARD_NUMBER: ${{ matrix.shard }}
+      NUM_TEST_SHARDS: ${{ matrix.num_shards }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PYTORCH_RETRY_TEST_CASES: 1
+    steps:
+      - name: Clean workspace
+        shell: bash
+        run: |
+          echo "${GITHUB_WORKSPACE}"
+          rm -rf "${GITHUB_WORKSPACE}"
+          mkdir "${GITHUB_WORKSPACE}"
+
+      - name: Checkout PyTorch
+        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # deep clone, to allow use of git merge-base
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Download PyTorch Build Artifacts from GHA
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.BUILD_ENVIRONMENT }}
+          path: .
+
+      - name: Unzip artifacts
+        run: |
+          unzip -o artifacts.zip
+
+      - name: Setup miniconda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-update-conda: true
+          python-version: 3.8
+          activate-environment: build
+
+      - name: Install macOS homebrew dependencies
+        run: |
+          # Install dependencies
+          brew install libomp
+
+      - name: Parse ref
+        id: parse-ref
+        run: .github/scripts/parse_ref.py
+
+      - name: Test
+        run: |
+          python3 -mpip install dist/*.whl
+          .jenkins/pytorch/macos-test.sh
+
+      # !{{ common.upload_downloaded_files(name='macos', config=test_job.config, shard=test_job.shard, num_shards=test_job.num_shards, runner=test_job.runner, artifact_name="test-jsons", use_s3=False) }}
+      # !{{ common.upload_test_reports("macos", config=test_job.config, shard=test_job.shard, num_shards=test_job.num_shards, runner=test_job.runner, artifact_name="test-reports", use_s3=False) }}
+      # !{{ common.upload_test_statistics(build_environment, needs_credentials=True) }}
