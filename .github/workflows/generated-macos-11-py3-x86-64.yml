@@ -196,8 +196,11 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_OSSCI_METRICS_SECRET_ACCESS_KEY }}
         shell: bash
         run: |
+          set -x
           python3 -m pip install -r requirements.txt
           python3 -m pip install boto3==1.19.12
+          GHA_WORKFLOW_JOB_ID=$(python .github/scripts/get_workflow_job_id.py "${GITHUB_RUN_ID}" "${GITHUB_JOB}")
+          export GHA_WORKFLOW_JOB_ID
           python3 -m tools.stats.print_test_stats --upload-to-s3 --compare-with-s3 test
   test_default_2_2:
     name: test (default, 2, 2, macos-11)
@@ -309,8 +312,11 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_OSSCI_METRICS_SECRET_ACCESS_KEY }}
         shell: bash
         run: |
+          set -x
           python3 -m pip install -r requirements.txt
           python3 -m pip install boto3==1.19.12
+          GHA_WORKFLOW_JOB_ID=$(python .github/scripts/get_workflow_job_id.py "${GITHUB_RUN_ID}" "${GITHUB_JOB}")
+          export GHA_WORKFLOW_JOB_ID
           python3 -m tools.stats.print_test_stats --upload-to-s3 --compare-with-s3 test
 
 
