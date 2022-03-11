@@ -11,7 +11,7 @@ from torch.nn.utils._per_sample_grad import call_for_per_sample_grads
 from torch.testing._internal.common_cuda import TEST_CUDA
 from torch.testing._internal.common_device_type import OpDTypes, instantiate_device_type_tests, ops
 from torch.testing._internal.common_nn import TestBase, module_tests, new_module_tests
-from torch.testing._internal.common_utils import TestCase, freeze_rng_state, make_tensor, run_tests
+from torch.testing._internal.common_utils import TestCase, freeze_rng_state, run_tests
 from torch.testing._internal.common_methods_invocations import SampleInput, op_db
 from torch.nn.utils._expanded_weights import ExpandedWeight
 from torch.nn.utils._expanded_weights.expanded_weights_utils import forward_helper, set_grad_sample_if_exists, \
@@ -187,18 +187,15 @@ class TestExpandedWeightFunctional(TestCase):
     def test_expanded_weight_forward(self, device, dtype, op):
         sample_inputs = op.sample_inputs(device, dtype)
         for sample_input in supported_inputs(op, sample_inputs):
+            if op.name == "nn.functional.embedding":  # embedding flips its argument order for autograd tests
+                sample_input = SampleInput(sample_input.args[0].clone(),
+                                           args=(sample_input.input.clone(),),
+                                           kwargs=sample_input.kwargs)
             batch_size = sample_input.input.shape[0] if len(sample_input.input.shape) > 1 else 1
             (ew_input, ew_args, ew_kwargs) = make_expanded_weight(sample_input, batch_size)
-            expanded_weight_result = op(ew_input, *ew_args, **ew_kwargs)
-            normal_result = op(sample_input.input, *sample_input.args, **sample_input.kwargs)
+            expanded_weight_result = run_op(op, ew_input, *ew_args, **ew_kwargs)
+            normal_result = run_op(op, sample_input.input, *sample_input.args, **sample_input.kwargs)
             self.assertEqual(expanded_weight_result, normal_result)
-
-    def test_expanded_weight_error(self, device):
-        batch_size = 3
-        sample_input = make_tensor((batch_size, 4), dtype=torch.float32, device=device, requires_grad=True)
-        sample_weight = make_tensor((4), dtype=torch.float32, device=device, requires_grad=True)
-        with self.assertRaisesRegex(RuntimeError, r"Expanded Weights encountered but cannot handle function"):
-            torch.add(sample_input, ExpandedWeight(sample_weight, batch_size))
 
     def test_small_model(self, device):
         def convnet(num_classes):
@@ -320,6 +317,8 @@ class ContextManagerTests(TestBase):
     def test_context_manager(self, test_case, device):
         kwargs = {'device': device, 'dtype': torch.double}
         module = self.constructor(*self.constructor_args).to(**kwargs)
+        if 'Embedding' in self.get_name():
+            kwargs['dtype'] = torch.long
         input = self._get_input().to(**kwargs)
         if len(input.shape) == 0 or input.shape[0] == 0:
             raise unittest.SkipTest("Can't get per sample gradients when no batch dim or batch dim is 0")
@@ -338,7 +337,7 @@ class ContextManagerTests(TestBase):
 
 # TODO: Once all of these use ModuleInfo, replace with ModuleInfo tests
 # These currently use the legacy nn tests
-supported_modules = ['Linear', 'Conv1d', 'Conv2d', 'Conv3d']
+supported_modules = ['Linear', 'Conv1d', 'Conv2d', 'Conv3d', 'Embedding']
 supported_tests = [t for t in module_tests + new_module_tests if 'module_name' in t and t['module_name'] in supported_modules]
 for test_param in supported_tests:
     if 'constructor' not in test_param:

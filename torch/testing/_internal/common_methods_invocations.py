@@ -14803,6 +14803,7 @@ op_db: List[OpInfo] = [
             # Reference: https://github.com/pytorch/pytorch/issues/67084
             DecorateInfo(unittest.skip("Skipped!"), 'TestMathBits', 'test_neg_view', device_type='cuda'),
         ),
+        supports_expanded_weight=True,
         supports_out=False,
     ),
     OpInfo(
