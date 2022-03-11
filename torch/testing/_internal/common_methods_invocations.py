@@ -11048,7 +11048,8 @@ op_db: List[OpInfo] = [
            skips=(
                DecorateInfo(unittest.skip("We don't want to differentiate wrt running mean / std"),
                             "TestCommon", "test_floating_inputs_are_differentiable"),),
-           sample_inputs_func=sample_inputs_instance_norm,),
+           sample_inputs_func=sample_inputs_instance_norm,
+           supports_expanded_weight=True,),
     OpInfo('nn.functional.layer_norm',
            aten_name='layer_norm',
            aliases=('layer_norm',),
