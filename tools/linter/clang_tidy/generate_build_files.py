@@ -1,6 +1,6 @@
+import os
 import subprocess
 import sys
-import os
 from typing import List
 
 
@@ -32,7 +32,6 @@ def update_submodules() -> None:
 
 def gen_compile_commands() -> None:
     os.environ["USE_NCCL"] = "0"
-    os.environ["USE_DEPLOY"] = "1"
     os.environ["CC"] = "clang"
     os.environ["CXX"] = "clang++"
     run_timed_cmd([sys.executable, "setup.py", "--cmake-only", "build"])
@@ -60,7 +59,7 @@ def run_autogen() -> None:
             "aten/src/ATen/native/native_functions.yaml",
             "--tags-path",
             "aten/src/ATen/native/tags.yaml",
-            "--gen_lazy_ts_backend",
+            "--gen-lazy-ts-backend",
         ]
     )
 

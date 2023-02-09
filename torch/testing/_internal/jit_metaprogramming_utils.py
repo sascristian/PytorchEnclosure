@@ -50,7 +50,7 @@ def create_input(call_args, requires_grad=True, non_contiguous=False, call_kwarg
         def conjugate(tensor):
             return tensor.conj()
 
-        if isinstance(arg, torch.Size) or isinstance(arg, dont_convert):
+        if isinstance(arg, (torch.Size, dont_convert)):
             return arg
         elif isinstance(arg, tuple) and len(arg) == 0:
             var = conjugate(torch.randn((), dtype=dtype, device=device))
@@ -165,6 +165,7 @@ nn_functional_tests = [
     ('softmax', (S, S, S), (0, 3, torch.double), 'with_all_args', (True,)),
     ('tanh', (S, S, S), (), '', (True,)),
     ('sigmoid', (S, S, S), (), '', (True,)),
+    ('silu', (S, S, S), (), '', (True,)),
     ('log_softmax', (S, S, S), (0,), '', (True,)),
     ('linear', (S, S), ((M, S),), '', (True, ['aten::linear'])),
     ('linear', (S, S), ((M, S), (M,)), 'addmm', (True, ['aten::linear'])),

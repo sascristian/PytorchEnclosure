@@ -43,6 +43,22 @@ Features described in this documentation are classified by release status:
    notes/*
 
 .. toctree::
+   :glob:
+   :maxdepth: 1
+   :caption: torch.compile
+   :hidden:
+
+   dynamo/index
+   dynamo/installation
+   dynamo/get-started
+   dynamo/guards-overview
+   dynamo/custom-backends
+   dynamo/deep-dive
+   dynamo/troubleshooting
+   dynamo/faq
+   ir
+
+.. toctree::
    :maxdepth: 1
    :caption: Language Bindings
 
@@ -51,7 +67,8 @@ Features described in this documentation are classified by release status:
    torch::deploy <deploy>
 
 .. toctree::
-   :maxdepth: 1
+   :glob:
+   :maxdepth: 2
    :caption: Python API
 
    torch
@@ -62,6 +79,7 @@ Features described in this documentation are classified by release status:
    tensor_view
    torch.amp <amp>
    torch.autograd <autograd>
+   torch.library <library>
    cuda
    torch.backends <backends>
    torch.distributed <distributed>
@@ -69,20 +87,26 @@ Features described in this documentation are classified by release status:
    torch.distributed.elastic <distributed.elastic>
    torch.distributed.fsdp <fsdp>
    torch.distributed.optim <distributed.optim>
+   torch.distributed.tensor.parallel <distributed.tensor.parallel>
+   torch.distributed.checkpoint <distributed.checkpoint>
    torch.distributions <distributions>
+   torch._dynamo <_dynamo>
    torch.fft <fft>
+   torch.func <func>
    futures
    fx
    torch.hub <hub>
    torch.jit <jit>
    torch.linalg <linalg>
    torch.monitor <monitor>
+   torch.signal <signal>
    torch.special <special>
    torch.overrides
    torch.package <package>
    profiler
    nn.init
    onnx
+   onnx_diagnostics
    optim
    complex_numbers
    ddp_comm_hooks
@@ -90,7 +114,8 @@ Features described in this documentation are classified by release status:
    quantization
    rpc
    torch.random <random>
-   nested
+   masked
+   torch.nested <nested>
    sparse
    storage
    torch.testing <testing>
@@ -99,6 +124,7 @@ Features described in this documentation are classified by release status:
    torch.utils.checkpoint <checkpoint>
    torch.utils.cpp_extension <cpp_extension>
    torch.utils.data <data>
+   torch.utils.jit <jit_utils>
    torch.utils.dlpack <dlpack>
    torch.utils.mobile_optimizer <mobile_optimizer>
    torch.utils.model_zoo <model_zoo>
@@ -118,7 +144,7 @@ Features described in this documentation are classified by release status:
    TorchServe <https://pytorch.org/serve>
    torchtext <https://pytorch.org/text/stable>
    torchvision <https://pytorch.org/vision/stable>
-   PyTorch on XLA Devices <http://pytorch.org/xla/>
+   PyTorch on XLA Devices <https://pytorch.org/xla/>
 
 Indices and tables
 ==================

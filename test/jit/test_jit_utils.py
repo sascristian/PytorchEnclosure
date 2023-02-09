@@ -3,7 +3,6 @@
 import os
 import sys
 from textwrap import dedent
-import unittest
 
 import torch
 
@@ -30,7 +29,6 @@ class TestJitUtils(JitTestCase):
             torch._jit_internal.get_callable_argument_names(fn_positional_or_keyword_args_only))
 
     # Tests that POSITIONAL_ONLY arguments are ignored.
-    @unittest.skipIf(sys.version_info < (3, 8), 'POSITIONAL_ONLY arguments are not supported before 3.8')
     def test_get_callable_argument_names_positional_only(self):
         code = dedent('''
             def fn_positional_only_arg(x, /, y):
@@ -69,7 +67,6 @@ class TestJitUtils(JitTestCase):
 
     # Tests that a function signature containing various different types of
     # arguments are ignored.
-    @unittest.skipIf(sys.version_info < (3, 8), 'POSITIONAL_ONLY arguments are not supported before 3.8')
     def test_get_callable_argument_names_hybrid(self):
         code = dedent('''
             def fn_hybrid_args(x, /, y, *args, **kwargs):
@@ -94,3 +91,15 @@ class TestJitUtils(JitTestCase):
         """)
 
         self.checkScriptRaisesRegex(s, (), Exception, "range", name="fn")
+
+    def test_no_tracer_warn_context_manager(self):
+        torch._C._jit_set_tracer_state_warn(True)
+        with jit_utils.NoTracerWarnContextManager() as no_warn:
+            self.assertEqual(
+                False,
+                torch._C._jit_get_tracer_state_warn()
+            )
+        self.assertEqual(
+            True,
+            torch._C._jit_get_tracer_state_warn()
+        )

@@ -4,10 +4,10 @@ from .utils import _toposort, freeze
 from .unification_tools import groupby, first  # type: ignore[import]
 
 
-class Dispatcher(object):
+class Dispatcher:
     def __init__(self, name):
         self.name = name
-        self.funcs = dict()
+        self.funcs = {}
         self.ordering = []
 
     def add(self, signature, func):
@@ -36,8 +36,10 @@ class Dispatcher(object):
             return self
         return _
 
+
 class VarDispatcher(Dispatcher):
     """ A dispatcher that calls functions with variable names
+    >>> # xdoctest: +SKIP
     >>> d = VarDispatcher('d')
     >>> x = var('x')
     >>> @d.register('inc', x)
@@ -57,9 +59,7 @@ class VarDispatcher(Dispatcher):
         return func(**d)
 
 
-
-
-global_namespace = dict()  # type: ignore[var-annotated]
+global_namespace = {}  # type: ignore[var-annotated]
 
 
 def match(*signature, **kwargs):

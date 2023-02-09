@@ -14,9 +14,9 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Awaitable, DefaultDict, Dict, List, Match, Optional, Set, cast
+from typing import Awaitable, cast, DefaultDict, Dict, List, Match, Optional, Set
 
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict  # Python 3.11+
 
 help_msg = """fast_nvcc [OPTION]... -- [NVCC_ARG]...
 

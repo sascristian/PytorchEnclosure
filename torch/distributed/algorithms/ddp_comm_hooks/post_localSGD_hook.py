@@ -8,7 +8,7 @@ from . import default_hooks as default
 logger = logging.getLogger(__name__)
 
 
-class PostLocalSGDState(object):
+class PostLocalSGDState:
     r"""
     Stores the state for all-reducing gradients globally using ``process_group`` until step ``start_localSGD_iter``,
     and all-reducing gradients locally using ``subgroup`` afterwards.
@@ -82,6 +82,7 @@ def post_localSGD_hook(
         Future handler of the communication, which updates the gradients in place.
 
     Example::
+        >>> # xdoctest: +SKIP
         >>> state = PostLocalSGDState(process_group=process_group, subgroup=subgroup,
                                   start_localSGD_iter=10)
         >>> ddp_model.register_comm_hook(state, post_localSGD_hook)

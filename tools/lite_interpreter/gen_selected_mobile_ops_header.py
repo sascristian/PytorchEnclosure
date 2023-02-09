@@ -2,10 +2,10 @@
 import argparse
 import os
 from typing import Set
-from torchgen.selective_build.selector import SelectiveBuilder
-from torchgen.code_template import CodeTemplate
 
 import yaml
+from torchgen.code_template import CodeTemplate
+from torchgen.selective_build.selector import SelectiveBuilder
 
 # Safely load fast C Yaml loader/dumper if they are available
 try:
@@ -147,6 +147,7 @@ def main() -> None:
     )
     parser.add_argument(
         "-p",
+        "--yaml-file-path",
         "--yaml_file_path",
         type=str,
         required=True,
@@ -154,6 +155,7 @@ def main() -> None:
     )
     parser.add_argument(
         "-o",
+        "--output-file-path",
         "--output_file_path",
         type=str,
         required=True,
