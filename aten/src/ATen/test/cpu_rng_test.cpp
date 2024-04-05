@@ -19,8 +19,7 @@ constexpr auto kCustomRNG = DispatchKey::CustomRNGKeyId;
 
 struct TestCPUGenerator : public c10::GeneratorImpl {
   TestCPUGenerator(uint64_t value) : GeneratorImpl{Device(DeviceType::CPU), DispatchKeySet(kCustomRNG)}, value_(value) { }
-  // NOLINTNEXTLINE(modernize-use-override)
-  ~TestCPUGenerator() = default;
+  ~TestCPUGenerator() override = default;
   uint32_t random() { return value_; }
   uint64_t random64() { return value_; }
   c10::optional<float> next_float_normal_sample() { return next_float_normal_sample_; }
@@ -28,6 +27,8 @@ struct TestCPUGenerator : public c10::GeneratorImpl {
   void set_next_float_normal_sample(c10::optional<float> randn) { next_float_normal_sample_ = randn; }
   void set_next_double_normal_sample(c10::optional<double> randn) { next_double_normal_sample_ = randn; }
   void set_current_seed(uint64_t seed) override { throw std::runtime_error("not implemented"); }
+  void set_offset(uint64_t offset) override { throw std::runtime_error("not implemented"); }
+  uint64_t get_offset() const override { throw std::runtime_error("not implemented"); }
   uint64_t current_seed() const override { throw std::runtime_error("not implemented"); }
   uint64_t seed() override { throw std::runtime_error("not implemented"); }
   void set_state(const c10::TensorImpl& new_state) override { throw std::runtime_error("not implemented"); }
@@ -131,7 +132,7 @@ Tensor& bernoulli_out(const Tensor& self, c10::optional<Generator> gen, Tensor& 
 
 TORCH_LIBRARY_IMPL(aten, CustomRNGKeyId, m) {
   // Random
-  m.impl("random_.from_int",             random_from_to);
+  m.impl("random_.from",             random_from_to);
   m.impl("random_.to",               random_to);
   m.impl("random_",                  random_);
   // Normal

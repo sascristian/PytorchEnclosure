@@ -1,9 +1,8 @@
 import torch
 from torch import Tensor
-from .optimizer import (Optimizer, _default_to_fused_or_foreach, _use_grad_for_differentiable,
-                        _differentiable_doc, _foreach_doc, _maximize_doc)
+from .optimizer import (Optimizer, _default_to_fused_or_foreach, _use_grad_for_differentiable, _get_scalar_dtype,
+                        _differentiable_doc, _foreach_doc, _maximize_doc, _capturable_doc, _view_as_real)
 from typing import List, Optional
-from torch.utils._foreach_utils import _group_tensors_by_device_and_dtype
 
 __all__ = ["RMSprop", "rmsprop"]
 
@@ -18,20 +17,21 @@ class RMSprop(Optimizer):
         weight_decay=0,
         momentum=0,
         centered=False,
+        capturable=False,
         foreach: Optional[bool] = None,
         maximize: bool = False,
         differentiable: bool = False,
     ):
         if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
+            raise ValueError(f"Invalid learning rate: {lr}")
         if not 0.0 <= eps:
-            raise ValueError("Invalid epsilon value: {}".format(eps))
+            raise ValueError(f"Invalid epsilon value: {eps}")
         if not 0.0 <= momentum:
-            raise ValueError("Invalid momentum value: {}".format(momentum))
+            raise ValueError(f"Invalid momentum value: {momentum}")
         if not 0.0 <= weight_decay:
-            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
         if not 0.0 <= alpha:
-            raise ValueError("Invalid alpha value: {}".format(alpha))
+            raise ValueError(f"Invalid alpha value: {alpha}")
 
         defaults = dict(
             lr=lr,
@@ -40,11 +40,12 @@ class RMSprop(Optimizer):
             eps=eps,
             centered=centered,
             weight_decay=weight_decay,
+            capturable=capturable,
             foreach=foreach,
             maximize=maximize,
             differentiable=differentiable,
         )
-        super(RMSprop, self).__init__(params, defaults)
+        super().__init__(params, defaults)
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -54,11 +55,21 @@ class RMSprop(Optimizer):
             group.setdefault("foreach", None)
             group.setdefault("maximize", False)
             group.setdefault("differentiable", False)
+            group.setdefault("capturable", False)
+            for p in group["params"]:
+                p_state = self.state.get(p, [])
+                if len(p_state) != 0 and not torch.is_tensor(p_state['step']):
+                    step_val = float(p_state["step"])
+                    p_state["step"] = (torch.tensor(step_val, dtype=_get_scalar_dtype(), device=p.device)
+                                       if group['capturable']
+                                       else torch.tensor(step_val, dtype=_get_scalar_dtype()))
 
-    def _init_group(self, group, params_with_grad, grads, square_avgs, momentum_buffer_list, grad_avgs):
+    def _init_group(self, group, params_with_grad, grads, square_avgs, momentum_buffer_list, grad_avgs, state_steps):
+        has_complex = False
         for p in group["params"]:
             if p.grad is None:
                 continue
+            has_complex |= torch.is_complex(p)
             params_with_grad.append(p)
 
             if p.grad.is_sparse:
@@ -69,7 +80,8 @@ class RMSprop(Optimizer):
 
             # State initialization
             if len(state) == 0:
-                state["step"] = 0
+                state["step"] = (torch.zeros((), dtype=_get_scalar_dtype(), device=p.device)
+                                 if group["capturable"] else torch.zeros((), dtype=_get_scalar_dtype()))
                 state["square_avg"] = torch.zeros_like(
                     p, memory_format=torch.preserve_format
                 )
@@ -82,16 +94,14 @@ class RMSprop(Optimizer):
                         p, memory_format=torch.preserve_format
                     )
             square_avgs.append(state["square_avg"])
+            state_steps.append(state["step"])
 
             if group["momentum"] > 0:
                 momentum_buffer_list.append(state["momentum_buffer"])
             if group["centered"]:
                 grad_avgs.append(state["grad_avg"])
 
-            if group["differentiable"] and isinstance(state["step"], Tensor):
-                raise RuntimeError("`step` can't be a tensor")
-
-            state["step"] += 1
+        return has_complex
 
     @_use_grad_for_differentiable
     def step(self, closure=None):
@@ -101,6 +111,8 @@ class RMSprop(Optimizer):
             closure (Callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+        self._cuda_graph_capture_health_check()
+
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -112,8 +124,10 @@ class RMSprop(Optimizer):
             square_avgs = []
             grad_avgs = []
             momentum_buffer_list = []
+            state_steps = []
 
-            self._init_group(group, params_with_grad, grads, square_avgs, momentum_buffer_list, grad_avgs)
+            has_complex = self._init_group(group, params_with_grad, grads, square_avgs,
+                                           momentum_buffer_list, grad_avgs, state_steps)
 
             rmsprop(
                 params_with_grad,
@@ -121,6 +135,7 @@ class RMSprop(Optimizer):
                 square_avgs,
                 grad_avgs,
                 momentum_buffer_list,
+                state_steps,
                 lr=group["lr"],
                 alpha=group["alpha"],
                 eps=group["eps"],
@@ -130,6 +145,8 @@ class RMSprop(Optimizer):
                 foreach=group["foreach"],
                 maximize=group["maximize"],
                 differentiable=group["differentiable"],
+                capturable=group["capturable"],
+                has_complex=has_complex,
             )
 
         return loss
@@ -177,7 +194,7 @@ RMSprop.__doc__ = r"""Implements RMSprop algorithm.
     learning rate is thus :math:`\gamma/(\sqrt{v} + \epsilon)` where :math:`\gamma`
     is the scheduled learning rate and :math:`v` is the weighted moving average
     of the squared gradient.
-    """ + r"""
+    """ + fr"""
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
@@ -189,11 +206,12 @@ RMSprop.__doc__ = r"""Implements RMSprop algorithm.
         centered (bool, optional) : if ``True``, compute the centered RMSProp,
             the gradient is normalized by an estimation of its variance
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        {foreach}
-        {maximize}
-        {differentiable}
+        {_foreach_doc}
+        {_maximize_doc}
+        {_capturable_doc}
+        {_differentiable_doc}
 
-    """.format(foreach=_foreach_doc, maximize=_maximize_doc, differentiable=_differentiable_doc)
+    """
 
 
 def rmsprop(
@@ -202,11 +220,14 @@ def rmsprop(
     square_avgs: List[Tensor],
     grad_avgs: List[Tensor],
     momentum_buffer_list: List[Tensor],
+    state_steps: List[Tensor],
     # kwonly args with defaults are not supported by functions compiled with torchscript issue #70627
     # setting this as kwarg for now as functional API is compiled by torch/distributed/optim
     foreach: Optional[bool] = None,
     maximize: bool = False,
     differentiable: bool = False,
+    capturable: bool = False,
+    has_complex: bool = False,
     *,
     lr: float,
     alpha: float,
@@ -218,10 +239,13 @@ def rmsprop(
     r"""Functional API that performs rmsprop algorithm computation.
     See :class:`~torch.optim.RMSProp` for details.
     """
+    # this check is slow during compilation, so we skip it
+    # if it's strictly needed we can add this check back in dynamo
+    if not torch._utils.is_compiling() and not all(isinstance(t, torch.Tensor) for t in state_steps):
+        raise RuntimeError("API has changed, `state_steps` argument must contain a list of singleton tensors")
 
     if foreach is None:
-        _, foreach = _default_to_fused_or_foreach([params, grads, square_avgs, grad_avgs, momentum_buffer_list],
-                                                  differentiable, has_fused=False)
+        _, foreach = _default_to_fused_or_foreach(params, differentiable, use_fused=False)
 
     if foreach and torch.jit.is_scripting():
         raise RuntimeError("torch.jit.script not supported with foreach optimizers")
@@ -237,6 +261,7 @@ def rmsprop(
         square_avgs,
         grad_avgs,
         momentum_buffer_list,
+        state_steps,
         lr=lr,
         alpha=alpha,
         eps=eps,
@@ -244,7 +269,9 @@ def rmsprop(
         momentum=momentum,
         centered=centered,
         maximize=maximize,
+        capturable=capturable,
         differentiable=differentiable,
+        has_complex=has_complex,
     )
 
 
@@ -254,6 +281,7 @@ def _single_tensor_rmsprop(
     square_avgs: List[Tensor],
     grad_avgs: List[Tensor],
     momentum_buffer_list: List[Tensor],
+    state_steps: List[Tensor],
     *,
     lr: float,
     alpha: float,
@@ -263,12 +291,24 @@ def _single_tensor_rmsprop(
     centered: bool,
     maximize: bool,
     differentiable: bool,
+    capturable: bool,
+    has_complex: bool,
 ):
 
     for i, param in enumerate(params):
+        step = state_steps[i]
+
+        # If compiling, the compiler will handle cudagraph checks, see note [torch.compile x capturable]
+        if not torch._utils.is_compiling() and capturable:
+            assert (
+                (param.is_cuda and step.is_cuda) or (param.is_xla and step.is_xla)
+            ), "If capturable=True, params and state_steps must be CUDA or XLA tensors."
+
         grad = grads[i]
         grad = grad if not maximize else -grad
         square_avg = square_avgs[i]
+
+        step += 1
 
         if weight_decay != 0:
             grad = grad.add(param, alpha=weight_decay)
@@ -285,7 +325,7 @@ def _single_tensor_rmsprop(
             grad_avg = grad_avgs[i]
             if is_complex_param:
                 grad_avg = torch.view_as_real(grad_avg)
-            grad_avg.mul_(alpha).add_(grad, alpha=1 - alpha)
+            grad_avg.lerp_(grad, 1 - alpha)
             avg = square_avg.addcmul(grad_avg, grad_avg, value=-1).sqrt_()
         else:
             avg = square_avg.sqrt()
@@ -311,6 +351,7 @@ def _multi_tensor_rmsprop(
     square_avgs: List[Tensor],
     grad_avgs: List[Tensor],
     momentum_buffer_list: List[Tensor],
+    state_steps: List[Tensor],
     *,
     lr: float,
     alpha: float,
@@ -320,38 +361,56 @@ def _multi_tensor_rmsprop(
     centered: bool,
     maximize: bool,
     differentiable: bool,
+    capturable: bool,
+    has_complex: bool,
 ):
-
     if len(params) == 0:
         return
 
     assert not differentiable, "_foreach ops don't support autograd"
 
-    grouped_tensors = _group_tensors_by_device_and_dtype([params, grads, square_avgs, grad_avgs, momentum_buffer_list])
-    for (grouped_params, grouped_grads, grouped_square_avgs, grouped_grad_avgs,
-         grouped_momentum_buffer_list) in grouped_tensors.values():
+    # If compiling, the compiler will handle cudagraph checks, see note [torch.compile x capturable]
+    if not torch._utils.is_compiling() and capturable:
+        assert all((p.is_cuda and step.is_cuda) or (p.is_xla and step.is_xla) for p, step in zip(params, state_steps)), \
+            "If capturable=True, params and state_steps must be CUDA tensors."
+
+
+    grouped_tensors = Optimizer._group_tensors_by_device_and_dtype([params, grads, square_avgs, grad_avgs,
+                                                                    momentum_buffer_list, state_steps])
+    for (((grouped_params, grouped_grads, grouped_square_avgs, grouped_grad_avgs,
+         grouped_momentum_buffer_list, grouped_state_steps)), _) in grouped_tensors.values():
+        if has_complex:
+            state_and_grads = [grouped_grads, grouped_square_avgs]
+            if momentum > 0:
+                state_and_grads.append(grouped_momentum_buffer_list)
+            if centered:
+                state_and_grads.append(grouped_grad_avgs)
+            _view_as_real(grouped_params, *state_and_grads)
+
         if maximize:
             grouped_grads = torch._foreach_neg(grouped_grads)
 
+        # Update steps
+        # If steps are on CPU, foreach will fall back to the slow path, which is a for-loop calling t.add(1) over
+        # and over. 1 will then be wrapped into a Tensor over and over again, which is slower than if we just
+        # wrapped it once now. The alpha is required to assure we go to the right overload.
+        if grouped_state_steps[0].is_cpu:
+            torch._foreach_add_(grouped_state_steps, torch.tensor(1.0, device='cpu'), alpha=1.0)
+        else:
+            torch._foreach_add_(grouped_state_steps, 1)
+
         if weight_decay != 0:
-            grouped_grads = torch._foreach_add(grouped_grads, grouped_params, alpha=weight_decay)
-
-        def _view_complex_as_real(tensor_list):
-            return [
-                torch.view_as_real(t) if torch.is_complex(t) else t for t in tensor_list
-            ]
-
-        grouped_grads = _view_complex_as_real(grouped_grads)
-        grouped_params = _view_complex_as_real(grouped_params)
-        grouped_square_avgs = _view_complex_as_real(grouped_square_avgs)
+            # Re-use the intermediate memory (grouped_grads) already allocated for maximize
+            if maximize:
+                torch._foreach_add_(grouped_grads, grouped_params, alpha=weight_decay)
+            else:
+                grouped_grads = torch._foreach_add(grouped_grads, grouped_params, alpha=weight_decay)
 
         torch._foreach_mul_(grouped_square_avgs, alpha)
         torch._foreach_addcmul_(grouped_square_avgs, grouped_grads, grouped_grads, value=1 - alpha)
 
         if centered:
-            grouped_grad_avgs = _view_complex_as_real(grouped_grad_avgs)
-            torch._foreach_mul_(grouped_grad_avgs, alpha)
-            torch._foreach_add_(grouped_grad_avgs, grouped_grads, alpha=1 - alpha)
+            torch._foreach_lerp_(grouped_grad_avgs, grouped_grads, 1 - alpha)
             avg = torch._foreach_addcmul(grouped_square_avgs, grouped_grad_avgs, grouped_grad_avgs, value=-1)
             torch._foreach_sqrt_(avg)
             torch._foreach_add_(avg, eps)
@@ -360,9 +419,20 @@ def _multi_tensor_rmsprop(
             torch._foreach_add_(avg, eps)
 
         if momentum > 0:
-            grouped_momentum_buffer_list = _view_complex_as_real(grouped_momentum_buffer_list)
             torch._foreach_mul_(grouped_momentum_buffer_list, momentum)
             torch._foreach_addcdiv_(grouped_momentum_buffer_list, grouped_grads, avg)
-            torch._foreach_add_(grouped_params, grouped_momentum_buffer_list, alpha=-lr)
+            # If LR is a tensor, the else branch will internally call item()
+            # which will cause silent incorrectness if we are capturing
+            if capturable and isinstance(lr, torch.Tensor):
+                momentum_lr = torch._foreach_mul(grouped_momentum_buffer_list, -lr)
+                torch._foreach_add_(grouped_params, momentum_lr)
+            else:
+                torch._foreach_add_(grouped_params, grouped_momentum_buffer_list, alpha=-lr)
         else:
-            torch._foreach_addcdiv_(grouped_params, grouped_grads, avg, value=-lr)
+            # If LR is a tensor, the else branch will internally call item()
+            # which will cause silent incorrectness if we are capturing
+            if capturable and isinstance(lr, torch.Tensor):
+                torch._foreach_div_(avg, -lr)
+                torch._foreach_addcdiv_(grouped_params, grouped_grads, avg)
+            else:
+                torch._foreach_addcdiv_(grouped_params, grouped_grads, avg, value=-lr)

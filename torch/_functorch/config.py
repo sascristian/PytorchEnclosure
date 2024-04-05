@@ -9,29 +9,22 @@ Global flags for aot autograd
 """
 import os
 import sys
-import logging
+from typing import TYPE_CHECKING
 
-use_functionalize = True
-
-use_fake_tensor = True
+# Converts torch rng ops to their functional philox rng equivalents. Note that
+# we functionalize only CUDA rng ops today.
+functionalize_rng_ops = False
 
 # can be useful for debugging if we are incorrectly creating meta fake tensors
 fake_tensor_allow_meta = os.environ.get("FAKE_ALLOW_META", True)
 
 # Enables optional asserts in hotpath code to check for errors.  If
 # you are seeing weird accuracy problems, try turning this on.
-# For now, to more easily identify bugs, this is turned on by default.
-debug_assert = True
-
-debug_fake_cross_ref = os.environ.get("AOT_FAKE_CROSSREF", False)
+# This is currently off by default as it will harm tracing time,
+# but it is on by default for aot_eager.
+debug_assert = False
 
 debug_partitioner = os.environ.get("AOT_PARTITIONER_DEBUG", False)
-# Prints out forward + backwards FX graphs
-debug_graphs = os.environ.get("AOT_FX_GRAPHS", False)
-# Prints out joint graph traced, before partitioning
-debug_joint = os.environ.get("AOT_FX_GRAPHS_JOINT", False)
-
-use_dynamic_shapes = os.getenv("AOT_DYNAMIC_SHAPES", False)
 
 static_weight_shapes = True
 
@@ -39,13 +32,47 @@ static_weight_shapes = True
 cse = True
 
 # Restricts the amount of computation AOTAutograd can do.
-max_dist_from_bw = 3
+# NB: We have essentially disabled this heuristic now. However, this is kept
+# here for now in case it's useful. Setting it low can artificially reduce the
+# amount of recomputation AOTAutograd performs, although not in any kind of
+# principled way.
+max_dist_from_bw = 1000
 
-log_level = (
-    logging.DEBUG if debug_partitioner or debug_graphs or debug_joint else logging.INFO
-)
 
-from .._dynamo.config_utils import install_config_module
+# Bans recomputation of nodes that are reading from nodes that is far before
+# the current node
+ban_recompute_used_far_apart = True
+# Breaks up long chain of fusible ops, as otherwise we can have an arbitrarily
+# long chain of recomputation in the backwards pass.
+ban_recompute_long_fusible_chains = True
+# Bans recomputation of nodes that must be materialized in the backwards pass
+# (used by a non-fusible node)
+ban_recompute_materialized_backward = True
+# Chooses to ban recomputation of nodes based off an allowlist. Setting it to
+# False changes it to use a denylist. Main change is on operators like
+# sort/pool/stuff that isn't cheap enough to be fusible for free but also isn't
+# that expensive
+ban_recompute_not_in_allowlist = True
+# Chooses to ban recomputation of reductions. This is generally a good idea, as
+# the result of reductions is generally very small but recomputing reductions in
+# a fusion can be expensive.
+ban_recompute_reductions = True
+
+
+# Sets all of the ban_recompute heuristics to False except ban_recompute_reductions
+# Generally, this will probably result in some memory improvement, but at the
+# cost of some performance
+aggressive_recomputation = False
+
+# If FakeTensor.data_ptr() should error.
+# This option is independent of AOTAutograd and torch.compile, but our policy
+# is to turn it off during torch.compile.
+fake_tensor_allow_unsafe_data_ptr_access = True
+
+if TYPE_CHECKING:
+    from torch.utils._config_typing import *  # noqa: F401, F403
+
+from torch.utils._config_module import install_config_module
 
 # adds patch, save_config, invalid config checks, etc
 install_config_module(sys.modules[__name__])

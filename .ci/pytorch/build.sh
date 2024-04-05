@@ -11,14 +11,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=./common-build.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common-build.sh"
 
-if [[ "$BUILD_ENVIRONMENT" == *-clang7-asan* ]]; then
-  exec "$(dirname "${BASH_SOURCE[0]}")/build-asan.sh" "$@"
-fi
-
-if [[ "$BUILD_ENVIRONMENT" == *-clang7-tsan* ]]; then
-  exec "$(dirname "${BASH_SOURCE[0]}")/build-tsan.sh" "$@"
-fi
-
 if [[ "$BUILD_ENVIRONMENT" == *-mobile-*build* ]]; then
   exec "$(dirname "${BASH_SOURCE[0]}")/build-mobile.sh" "$@"
 fi
@@ -36,6 +28,8 @@ echo "Environment variables:"
 env
 
 if [[ "$BUILD_ENVIRONMENT" == *cuda* ]]; then
+  # Use jemalloc during compilation to mitigate https://github.com/pytorch/pytorch/issues/116289
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
   echo "NVCC version:"
   nvcc --version
 fi
@@ -44,6 +38,7 @@ if [[ "$BUILD_ENVIRONMENT" == *cuda11* ]]; then
   if [[ "$BUILD_ENVIRONMENT" != *cuda11.3* && "$BUILD_ENVIRONMENT" != *clang* ]]; then
     # TODO: there is a linking issue when building with UCC using clang,
     # disable it for now and to be fix later.
+    # TODO: disable UCC temporarily to enable CUDA 12.1 in CI
     export USE_UCC=1
     export USE_SYSTEM_UCC=1
   fi
@@ -70,6 +65,12 @@ else
   export LLVM_DIR=/opt/llvm/lib/cmake/llvm
 fi
 
+if [[ "$BUILD_ENVIRONMENT" == *executorch* ]]; then
+  # To build test_edge_op_registration
+  export BUILD_EXECUTORCH=ON
+  export USE_CUDA=0
+fi
+
 if ! which conda; then
   # In ROCm CIs, we are doing cross compilation on build machines with
   # intel cpu and later run tests on machines with amd cpu.
@@ -81,6 +82,19 @@ if ! which conda; then
   fi
 else
   export CMAKE_PREFIX_PATH=/opt/conda
+
+  # Workaround required for MKL library linkage
+  # https://github.com/pytorch/pytorch/issues/119557
+  if [ "$ANACONDA_PYTHON_VERSION" = "3.12" ]; then
+    export CMAKE_LIBRARY_PATH="/opt/conda/envs/py_$ANACONDA_PYTHON_VERSION/lib/"
+    export CMAKE_INCLUDE_PATH="/opt/conda/envs/py_$ANACONDA_PYTHON_VERSION/include/"
+  fi
+fi
+
+if [[ "$BUILD_ENVIRONMENT" == *aarch64* ]]; then
+  export USE_MKLDNN=1
+  export USE_MKLDNN_ACL=1
+  export ACL_ROOT_DIR=/ComputeLibrary
 fi
 
 if [[ "$BUILD_ENVIRONMENT" == *libtorch* ]]; then
@@ -152,6 +166,12 @@ if [[ "$BUILD_ENVIRONMENT" == *rocm* ]]; then
   python tools/amd_build/build_amd.py
 fi
 
+if [[ "$BUILD_ENVIRONMENT" == *xpu* ]]; then
+  # shellcheck disable=SC1091
+  source /opt/intel/oneapi/compiler/latest/env/vars.sh
+  export USE_XPU=1
+fi
+
 # sccache will fail for CUDA builds if all cores are used for compiling
 # gcc 7 with sccache seems to have intermittent OOM issue if all cores are used
 if [ -z "$MAX_JOBS" ]; then
@@ -166,9 +186,25 @@ if [[ "$BUILD_ENVIRONMENT" == *cuda* && -z "$TORCH_CUDA_ARCH_LIST" ]]; then
   exit 1
 fi
 
+# We only build FlashAttention files for CUDA 8.0+, and they require large amounts of
+# memory to build and will OOM
+if [[ "$BUILD_ENVIRONMENT" == *cuda* ]] && [[ "$TORCH_CUDA_ARCH_LIST" == *"8.6"* || "$TORCH_CUDA_ARCH_LIST" == *"8.0"* ]]; then
+  echo "WARNING: FlashAttention files require large amounts of memory to build and will OOM"
+  echo "Setting MAX_JOBS=(nproc-2)/3 to reduce memory usage"
+  export MAX_JOBS="$(( $(nproc --ignore=2) / 3 ))"
+fi
+
 if [[ "${BUILD_ENVIRONMENT}" == *clang* ]]; then
   export CC=clang
   export CXX=clang++
+fi
+
+if [[ "$BUILD_ENVIRONMENT" == *-clang*-asan* ]]; then
+  export LDSHARED="clang --shared"
+  export USE_CUDA=0
+  export USE_ASAN=1
+  export UBSAN_FLAGS="-fno-sanitize-recover=all;-fno-sanitize=float-divide-by-zero;-fno-sanitize=float-cast-overflow"
+  unset USE_LLVM
 fi
 
 if [[ "${BUILD_ENVIRONMENT}" == *no-ops* ]]; then
@@ -187,20 +223,37 @@ if [[ "${BUILD_ENVIRONMENT}" != *android* && "${BUILD_ENVIRONMENT}" != *cuda* ]]
   export BUILD_STATIC_RUNTIME_BENCHMARK=ON
 fi
 
+# Workaround for dind-rootless userid mapping (https://github.com/pytorch/ci-infra/issues/96)
+WORKSPACE_ORIGINAL_OWNER_ID=$(stat -c '%u' "/var/lib/jenkins/workspace")
+cleanup_workspace() {
+  echo "sudo may print the following warning message that can be ignored. The chown command will still run."
+  echo "    sudo: setrlimit(RLIMIT_STACK): Operation not permitted"
+  echo "For more details refer to https://github.com/sudo-project/sudo/issues/42"
+  sudo chown -R "$WORKSPACE_ORIGINAL_OWNER_ID" /var/lib/jenkins/workspace
+}
+# Disable shellcheck SC2064 as we want to parse the original owner immediately.
+# shellcheck disable=SC2064
+trap_add cleanup_workspace EXIT
+sudo chown -R jenkins /var/lib/jenkins/workspace
+git config --global --add safe.directory /var/lib/jenkins/workspace
+
 if [[ "$BUILD_ENVIRONMENT" == *-bazel-* ]]; then
   set -e
 
   get_bazel
+  install_sccache_nvcc_for_bazel
 
   # Leave 1 CPU free and use only up to 80% of memory to reduce the change of crashing
   # the runner
   BAZEL_MEM_LIMIT="--local_ram_resources=HOST_RAM*.8"
   BAZEL_CPU_LIMIT="--local_cpu_resources=HOST_CPUS-1"
 
-  tools/bazel build --config=no-tty "${BAZEL_MEM_LIMIT}" "${BAZEL_CPU_LIMIT}" //...
-  # Build torch, the Python module, and tests for CPU-only
-  tools/bazel build --config=no-tty "${BAZEL_MEM_LIMIT}" "${BAZEL_CPU_LIMIT}" --config=cpu-only :torch :_C.so :all_tests
-
+  if [[ "$CUDA_VERSION" == "cpu" ]]; then
+    # Build torch, the Python module, and tests for CPU-only
+    tools/bazel build --config=no-tty "${BAZEL_MEM_LIMIT}" "${BAZEL_CPU_LIMIT}" --config=cpu-only :torch :torch/_C.so :all_tests
+  else
+    tools/bazel build --config=no-tty "${BAZEL_MEM_LIMIT}" "${BAZEL_CPU_LIMIT}" //...
+  fi
 else
   # check that setup.py would fail with bad arguments
   echo "The next three invocations are expected to fail with invalid command error messages."
@@ -209,13 +262,17 @@ else
   ( ! get_exit_code python setup.py clean bad_argument )
 
   if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
-
     # rocm builds fail when WERROR=1
     # XLA test build fails when WERROR=1
     # set only when building other architectures
     # or building non-XLA tests.
     if [[ "$BUILD_ENVIRONMENT" != *rocm*  &&
           "$BUILD_ENVIRONMENT" != *xla* ]]; then
+      if [[ "$BUILD_ENVIRONMENT" != *py3.8* ]]; then
+        # Install numpy-2.0 release candidate for builds
+        # Which should be backward compatible with Numpy-1.X
+        python -mpip install --pre numpy==2.0.0rc1
+      fi
       WERROR=1 python setup.py bdist_wheel
     else
       python setup.py bdist_wheel
@@ -292,6 +349,13 @@ else
   else
     # Test no-Python build
     echo "Building libtorch"
+
+    # This is an attempt to mitigate flaky libtorch build OOM error. By default, the build parallelization
+    # is set to be the number of CPU minus 2. So, let's try a more conservative value here. A 4xlarge has
+    # 16 CPUs
+    MAX_JOBS=$(nproc --ignore=4)
+    export MAX_JOBS
+
     # NB: Install outside of source directory (at the same level as the root
     # pytorch folder) so that it doesn't get cleaned away prior to docker push.
     BUILD_LIBTORCH_PY=$PWD/tools/build_libtorch.py

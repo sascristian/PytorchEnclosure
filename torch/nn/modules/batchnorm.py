@@ -15,7 +15,7 @@ __all__ = ['BatchNorm1d', 'LazyBatchNorm1d', 'BatchNorm2d', 'LazyBatchNorm2d', '
 
 
 class _NormBase(Module):
-    """Common base of _InstanceNorm and _BatchNorm"""
+    """Common base of _InstanceNorm and _BatchNorm."""
 
     _version = 2
     __constants__ = ["track_running_stats", "momentum", "eps", "num_features", "affine"]
@@ -38,7 +38,7 @@ class _NormBase(Module):
         dtype=None
     ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(_NormBase, self).__init__()
+        super().__init__()
         self.num_features = num_features
         self.eps = eps
         self.momentum = momentum
@@ -105,9 +105,13 @@ class _NormBase(Module):
             #               this should have a default value of 0
             num_batches_tracked_key = prefix + "num_batches_tracked"
             if num_batches_tracked_key not in state_dict:
-                state_dict[num_batches_tracked_key] = torch.tensor(0, dtype=torch.long)
+                state_dict[num_batches_tracked_key] = (
+                    self.num_batches_tracked
+                    if self.num_batches_tracked is not None and self.num_batches_tracked.device != torch.device('meta')
+                    else torch.tensor(0, dtype=torch.long)
+                )
 
-        super(_NormBase, self)._load_from_state_dict(
+        super()._load_from_state_dict(
             state_dict,
             prefix,
             local_metadata,
@@ -130,7 +134,7 @@ class _BatchNorm(_NormBase):
         dtype=None
     ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(_BatchNorm, self).__init__(
+        super().__init__(
             num_features, eps, momentum, affine, track_running_stats, **factory_kwargs
         )
 
@@ -191,7 +195,7 @@ class _LazyNormBase(LazyModuleMixin, _NormBase):
     def __init__(self, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(_LazyNormBase, self).__init__(
+        super().__init__(
             # affine and track_running_stats are hardcoded to False to
             # avoid creating tensors that will soon be overwritten.
             0,
@@ -231,7 +235,9 @@ class _LazyNormBase(LazyModuleMixin, _NormBase):
 
 
 class BatchNorm1d(_BatchNorm):
-    r"""Applies Batch Normalization over a 2D or 3D input as described in the paper
+    r"""Applies Batch Normalization over a 2D or 3D input.
+
+    Method described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing
     Internal Covariate Shift <https://arxiv.org/abs/1502.03167>`__ .
 
@@ -242,8 +248,11 @@ class BatchNorm1d(_BatchNorm):
     The mean and standard-deviation are calculated per-dimension over
     the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
     of size `C` (where `C` is the number of features or channels of the input). By default, the
-    elements of :math:`\gamma` are set to 1 and the elements of :math:`\beta` are set to 0. The
-    standard-deviation is calculated via the biased estimator, equivalent to `torch.var(input, unbiased=False)`.
+    elements of :math:`\gamma` are set to 1 and the elements of :math:`\beta` are set to 0.
+    At train time in the forward pass, the standard-deviation is calculated via the biased estimator,
+    equivalent to ``torch.var(input, unbiased=False)``. However, the value stored in the
+    moving average of the standard-deviation is calculated via the unbiased  estimator, equivalent to
+    ``torch.var(input, unbiased=True)``.
 
     Also by default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -299,13 +308,14 @@ class BatchNorm1d(_BatchNorm):
     def _check_input_dim(self, input):
         if input.dim() != 2 and input.dim() != 3:
             raise ValueError(
-                "expected 2D or 3D input (got {}D input)".format(input.dim())
+                f"expected 2D or 3D input (got {input.dim()}D input)"
             )
 
 
 class LazyBatchNorm1d(_LazyNormBase, _BatchNorm):
-    r"""A :class:`torch.nn.BatchNorm1d` module with lazy initialization of
-    the ``num_features`` argument of the :class:`BatchNorm1d` that is inferred
+    r"""A :class:`torch.nn.BatchNorm1d` module with lazy initialization.
+
+    Lazy initialization based on the ``num_features`` argument of the :class:`BatchNorm1d` that is inferred
     from the ``input.size(1)``.
     The attributes that will be lazily initialized are `weight`, `bias`,
     `running_mean` and `running_var`.
@@ -334,13 +344,15 @@ class LazyBatchNorm1d(_LazyNormBase, _BatchNorm):
     def _check_input_dim(self, input):
         if input.dim() != 2 and input.dim() != 3:
             raise ValueError(
-                "expected 2D or 3D input (got {}D input)".format(input.dim())
+                f"expected 2D or 3D input (got {input.dim()}D input)"
             )
 
 
 class BatchNorm2d(_BatchNorm):
-    r"""Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
-    with additional channel dimension) as described in the paper
+    r"""Applies Batch Normalization over a 4D input.
+
+    4D is a mini-batch of 2D inputs
+    with additional channel dimension. Method described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing
     Internal Covariate Shift <https://arxiv.org/abs/1502.03167>`__ .
 
@@ -351,8 +363,11 @@ class BatchNorm2d(_BatchNorm):
     The mean and standard-deviation are calculated per-dimension over
     the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
     of size `C` (where `C` is the input size). By default, the elements of :math:`\gamma` are set
-    to 1 and the elements of :math:`\beta` are set to 0. The standard-deviation is calculated
-    via the biased estimator, equivalent to `torch.var(input, unbiased=False)`.
+    to 1 and the elements of :math:`\beta` are set to 0. At train time in the forward pass, the
+    standard-deviation is calculated via the biased estimator, equivalent to
+    ``torch.var(input, unbiased=False)``. However, the value stored in the moving average of the
+    standard-deviation is calculated via the unbiased  estimator, equivalent to
+    ``torch.var(input, unbiased=True)``.
 
     Also by default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -407,12 +422,13 @@ class BatchNorm2d(_BatchNorm):
 
     def _check_input_dim(self, input):
         if input.dim() != 4:
-            raise ValueError("expected 4D input (got {}D input)".format(input.dim()))
+            raise ValueError(f"expected 4D input (got {input.dim()}D input)")
 
 
 class LazyBatchNorm2d(_LazyNormBase, _BatchNorm):
-    r"""A :class:`torch.nn.BatchNorm2d` module with lazy initialization of
-    the ``num_features`` argument of the :class:`BatchNorm2d` that is inferred
+    r"""A :class:`torch.nn.BatchNorm2d` module with lazy initialization.
+
+    Lazy initialization is done for the ``num_features`` argument of the :class:`BatchNorm2d` that is inferred
     from the ``input.size(1)``.
     The attributes that will be lazily initialized are `weight`, `bias`,
     `running_mean` and `running_var`.
@@ -440,12 +456,13 @@ class LazyBatchNorm2d(_LazyNormBase, _BatchNorm):
 
     def _check_input_dim(self, input):
         if input.dim() != 4:
-            raise ValueError("expected 4D input (got {}D input)".format(input.dim()))
+            raise ValueError(f"expected 4D input (got {input.dim()}D input)")
 
 
 class BatchNorm3d(_BatchNorm):
-    r"""Applies Batch Normalization over a 5D input (a mini-batch of 3D inputs
-    with additional channel dimension) as described in the paper
+    r"""Applies Batch Normalization over a 5D input.
+
+    5D is a mini-batch of 3D inputs with additional channel dimension as described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing
     Internal Covariate Shift <https://arxiv.org/abs/1502.03167>`__ .
 
@@ -456,8 +473,11 @@ class BatchNorm3d(_BatchNorm):
     The mean and standard-deviation are calculated per-dimension over
     the mini-batches and :math:`\gamma` and :math:`\beta` are learnable parameter vectors
     of size `C` (where `C` is the input size). By default, the elements of :math:`\gamma` are set
-    to 1 and the elements of :math:`\beta` are set to 0. The standard-deviation is calculated
-    via the biased estimator, equivalent to `torch.var(input, unbiased=False)`.
+    to 1 and the elements of :math:`\beta` are set to 0. At train time in the forward pass, the
+    standard-deviation is calculated via the biased estimator, equivalent to
+    ``torch.var(input, unbiased=False)``. However, the value stored in the moving average of the
+    standard-deviation is calculated via the unbiased  estimator, equivalent to
+    ``torch.var(input, unbiased=True)``.
 
     Also by default, during training this layer keeps running estimates of its
     computed mean and variance, which are then used for normalization during
@@ -513,12 +533,13 @@ class BatchNorm3d(_BatchNorm):
 
     def _check_input_dim(self, input):
         if input.dim() != 5:
-            raise ValueError("expected 5D input (got {}D input)".format(input.dim()))
+            raise ValueError(f"expected 5D input (got {input.dim()}D input)")
 
 
 class LazyBatchNorm3d(_LazyNormBase, _BatchNorm):
-    r"""A :class:`torch.nn.BatchNorm3d` module with lazy initialization of
-    the ``num_features`` argument of the :class:`BatchNorm3d` that is inferred
+    r"""A :class:`torch.nn.BatchNorm3d` module with lazy initialization.
+
+    Lazy initialization is done for the ``num_features`` argument of the :class:`BatchNorm3d` that is inferred
     from the ``input.size(1)``.
     The attributes that will be lazily initialized are `weight`, `bias`,
     `running_mean` and `running_var`.
@@ -546,12 +567,13 @@ class LazyBatchNorm3d(_LazyNormBase, _BatchNorm):
 
     def _check_input_dim(self, input):
         if input.dim() != 5:
-            raise ValueError("expected 5D input (got {}D input)".format(input.dim()))
+            raise ValueError(f"expected 5D input (got {input.dim()}D input)")
 
 
 class SyncBatchNorm(_BatchNorm):
-    r"""Applies Batch Normalization over a N-Dimensional input (a mini-batch of [N-2]D inputs
-    with additional channel dimension) as described in the paper
+    r"""Applies Batch Normalization over a N-Dimensional input.
+
+    The N-D input is a mini-batch of [N-2]D inputs with additional channel dimension) as described in the paper
     `Batch Normalization: Accelerating Deep Network Training by Reducing
     Internal Covariate Shift <https://arxiv.org/abs/1502.03167>`__ .
 
@@ -663,7 +685,7 @@ class SyncBatchNorm(_BatchNorm):
         dtype=None
     ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(SyncBatchNorm, self).__init__(
+        super().__init__(
             num_features, eps, momentum, affine, track_running_stats, **factory_kwargs
         )
         self.process_group = process_group
@@ -671,7 +693,7 @@ class SyncBatchNorm(_BatchNorm):
     def _check_input_dim(self, input):
         if input.dim() < 2:
             raise ValueError(
-                "expected at least 2D input (got {}D input)".format(input.dim())
+                f"expected at least 2D input (got {input.dim()}D input)"
             )
 
     def _check_non_zero_input_channels(self, input):
@@ -726,9 +748,10 @@ class SyncBatchNorm(_BatchNorm):
         need_sync = (bn_training and self.training and
                      torch.distributed.is_available() and torch.distributed.is_initialized())
         if need_sync:
-            # currently only GPU input is supported
-            if not input.is_cuda:
-                raise ValueError("SyncBatchNorm expected input tensor to be on GPU")
+            # currently only GPU/PrivateUse1 input is supported
+            if input.device.type not in ["cuda", torch._C._get_privateuse1_backend_name()]:
+                raise ValueError("SyncBatchNorm expected input tensor to be on GPU or "
+                                 f"{torch._C._get_privateuse1_backend_name()}")
 
             process_group = torch.distributed.group.WORLD
             if self.process_group:
@@ -758,14 +781,13 @@ class SyncBatchNorm(_BatchNorm):
                 running_var,
                 self.eps,
                 exponential_average_factor,
-                process_group,
-                world_size,
+                process_group,  # type: ignore[possibly-undefined]
+                world_size,  # type: ignore[possibly-undefined]
             )
 
     @classmethod
     def convert_sync_batchnorm(cls, module, process_group=None):
-        r"""Helper function to convert all :attr:`BatchNorm*D` layers in the model to
-        :class:`torch.nn.SyncBatchNorm` layers.
+        r"""Converts all :attr:`BatchNorm*D` layers in the model to :class:`torch.nn.SyncBatchNorm` layers.
 
         Args:
             module (nn.Module): module containing one or more :attr:`BatchNorm*D` layers
@@ -816,6 +838,7 @@ class SyncBatchNorm(_BatchNorm):
             module_output.running_mean = module.running_mean
             module_output.running_var = module.running_var
             module_output.num_batches_tracked = module.num_batches_tracked
+            module_output.training = module.training
             if hasattr(module, "qconfig"):
                 module_output.qconfig = module.qconfig
         for name, child in module.named_children():

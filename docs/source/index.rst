@@ -43,22 +43,6 @@ Features described in this documentation are classified by release status:
    notes/*
 
 .. toctree::
-   :glob:
-   :maxdepth: 1
-   :caption: torch.compile
-   :hidden:
-
-   dynamo/index
-   dynamo/installation
-   dynamo/get-started
-   dynamo/guards-overview
-   dynamo/custom-backends
-   dynamo/deep-dive
-   dynamo/troubleshooting
-   dynamo/faq
-   ir
-
-.. toctree::
    :maxdepth: 1
    :caption: Language Bindings
 
@@ -80,8 +64,14 @@ Features described in this documentation are classified by release status:
    torch.amp <amp>
    torch.autograd <autograd>
    torch.library <library>
+   cpu
    cuda
+   torch.cuda.memory <torch_cuda_memory>
+   mps
+   xpu
+   meta
    torch.backends <backends>
+   torch.export <export>
    torch.distributed <distributed>
    torch.distributed.algorithms.join <distributed.algorithms.join>
    torch.distributed.elastic <distributed.elastic>
@@ -90,11 +80,12 @@ Features described in this documentation are classified by release status:
    torch.distributed.tensor.parallel <distributed.tensor.parallel>
    torch.distributed.checkpoint <distributed.checkpoint>
    torch.distributions <distributions>
-   torch._dynamo <_dynamo>
+   torch.compiler <torch.compiler>
    torch.fft <fft>
    torch.func <func>
    futures
    fx
+   fx.experimental
    torch.hub <hub>
    torch.jit <jit>
    torch.linalg <linalg>
@@ -105,8 +96,8 @@ Features described in this documentation are classified by release status:
    torch.package <package>
    profiler
    nn.init
+   nn.attention
    onnx
-   onnx_diagnostics
    optim
    complex_numbers
    ddp_comm_hooks
@@ -119,11 +110,13 @@ Features described in this documentation are classified by release status:
    sparse
    storage
    torch.testing <testing>
+   torch.utils <utils>
    torch.utils.benchmark <benchmark_utils>
    torch.utils.bottleneck <bottleneck>
    torch.utils.checkpoint <checkpoint>
    torch.utils.cpp_extension <cpp_extension>
    torch.utils.data <data>
+   torch.utils.deterministic <deterministic>
    torch.utils.jit <jit_utils>
    torch.utils.dlpack <dlpack>
    torch.utils.mobile_optimizer <mobile_optimizer>
@@ -133,6 +126,9 @@ Features described in this documentation are classified by release status:
    named_tensor
    name_inference
    torch.__config__ <config_mod>
+   torch.__future__ <future_mod>
+   logging
+   torch_environment_variables
 
 .. toctree::
    :maxdepth: 1

@@ -23,7 +23,7 @@ def conv_picker(func, conv1dOpt, conv2dOpt, conv3dOpt):
 def conv_args_and_kwargs(kwarg_names, expanded_args_and_kwargs):
     args = expanded_args_and_kwargs[:len(expanded_args_and_kwargs) - len(kwarg_names)]
     kwargs = expanded_args_and_kwargs[len(expanded_args_and_kwargs) - len(kwarg_names):]
-    kwargs = {name: arg for (name, arg) in zip(kwarg_names, kwargs)}
+    kwargs = dict(zip(kwarg_names, kwargs))
 
     return conv_normalizer(*args, **kwargs)
 
@@ -187,7 +187,8 @@ def unfold3d(
     dilation,
 ):
     r"""
-    Extracts sliding local blocks from an batched input tensor.
+    Extract sliding local blocks from an batched input tensor.
+
     :class:`torch.nn.Unfold` only supports 4D inputs (batched image-like tensors).
     This method implements the same action for 5D inputs
     Args:
@@ -197,7 +198,7 @@ def unfold3d(
         stride: the stride of the sliding blocks in the input spatial dimensions
         dilation: the spacing between the kernel points.
     Returns:
-        A tensor of shape ``(B, C * np.product(kernel_size), L)``, where L - output spatial dimensions.
+        A tensor of shape ``(B, C * np.prod(kernel_size), L)``, where L - output spatial dimensions.
         See :class:`torch.nn.Unfold` for more details
     Example:
         >>> # xdoctest: +SKIP
@@ -206,7 +207,6 @@ def unfold3d(
         >>> unfold3d(tensor, kernel_size=2, padding=0, stride=1).shape
         torch.Size([3, 32, 120])
     """
-
     if len(tensor.shape) != 5:
         raise ValueError(
             f"Input tensor must be of the shape [B, C, D, H, W]. Got{tensor.shape}"

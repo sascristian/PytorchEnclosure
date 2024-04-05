@@ -6,7 +6,9 @@ import string
 from functools import reduce
 from operator import mul
 
-from torch.testing._internal.common_utils import TestCase, TEST_SCIPY, skipIfNoLapack
+from torch.testing._internal.common_utils import (
+    TestCase, TEST_SCIPY, skipIfNoLapack, skipIfTorchDynamo, run_tests
+)
 import torch
 import torch.nn.init as init
 import torch.nn.functional as F
@@ -16,7 +18,7 @@ if TEST_SCIPY:
 
 class TestNNInit(TestCase):
     def setUp(self):
-        super(TestNNInit, self).setUp()
+        super().setUp()
         random.seed(123)
 
     def _is_normal(self, tensor, mean, std):
@@ -91,6 +93,7 @@ class TestNNInit(TestCase):
                 init.calculate_gain(random_string)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_uniform(self):
         for dims in [1, 2, 4]:
             input_tensor = self._create_random_nd_tensor(dims, size_min=30, size_max=50)
@@ -100,6 +103,7 @@ class TestNNInit(TestCase):
             assert self._is_uniform(input_tensor, a, b)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_normal(self):
         for dims in [1, 2, 4]:
             input_tensor = self._create_random_nd_tensor(dims, size_min=30, size_max=50)
@@ -110,6 +114,7 @@ class TestNNInit(TestCase):
             assert self._is_normal(input_tensor, mean, std)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_trunc_normal(self):
         for dims in [1, 2, 4]:
             input_tensor = self._create_random_nd_tensor(dims, size_min=30, size_max=50)
@@ -120,6 +125,21 @@ class TestNNInit(TestCase):
             init.trunc_normal_(input_tensor, mean=mean, std=std, a=a, b=b)
 
             assert self._is_trunc_normal(input_tensor, mean, std, a, b)
+
+    @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
+    def test_trunc_normal_generator(self):
+        gen = torch.Generator()
+        gen.manual_seed(42)
+        input_tensor = torch.empty(5)
+        init.trunc_normal_(input_tensor, generator=gen)
+
+        ref = torch.empty(5)
+        torch.manual_seed(42)
+        init.trunc_normal_(ref)
+
+        self.assertEqual(input_tensor, ref)
+        assert self._is_trunc_normal(input_tensor, mean=0, std=1, a=0, b=1)
 
     def test_constant(self):
         for dims in [1, 2, 4]:
@@ -263,6 +283,7 @@ class TestNNInit(TestCase):
                 assert self._is_uniform(input_tensor, -bounds, bounds)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_xavier_normal(self):
         for use_gain in [True, False]:
             for dims in [2, 4]:
@@ -307,6 +328,7 @@ class TestNNInit(TestCase):
             _ = init.kaiming_normal_(tensor)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_kaiming_uniform(self):
         for use_a in [True, False]:
             for dims in [2, 4]:
@@ -335,6 +357,7 @@ class TestNNInit(TestCase):
                     assert self._is_uniform(input_tensor, -bounds, bounds)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_kaiming_normal(self):
         for use_a in [True, False]:
             for dims in [2, 4]:
@@ -369,6 +392,7 @@ class TestNNInit(TestCase):
                 init.sparse_(tensor, sparsity)
 
     @unittest.skipIf(not TEST_SCIPY, "Scipy not found.")
+    @skipIfTorchDynamo("scipy.kstest is failing under dynamo")
     def test_sparse_default_std(self):
         for use_random_std in [True, False]:
             input_tensor = self._create_random_nd_tensor(2, size_min=30, size_max=35)
@@ -418,3 +442,7 @@ class TestNNInit(TestCase):
 
         with self.assertWarnsRegex(UserWarning, 'deprecated', msg='methods not suffixed with underscore should be deprecated'):
             fn()
+
+
+if __name__ == '__main__':
+    run_tests()

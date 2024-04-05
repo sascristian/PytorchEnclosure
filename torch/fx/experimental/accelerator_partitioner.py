@@ -259,12 +259,7 @@ def get_device_to_partitions_mapping(
     # Find devices for all the partitions without a device
     found_device = True
     for partition in no_device_partitions:
-        device_to_left_mem_bytes = {
-            d: left_mem_bytes
-            for d, left_mem_bytes in sorted(
-                device_to_left_mem_bytes.items(), key=lambda item: item[1]
-            )
-        }
+        device_to_left_mem_bytes = dict(sorted(device_to_left_mem_bytes.items(), key=lambda item: item[1]))
         found_device = find_device_for(partition)
         if not found_device:
             break
@@ -275,7 +270,7 @@ def check_dependency(partition):
     """Given a partition,check if there is a circular dependency on
     this partition using bfs
     """
-    visited: Set[Partition] = set([partition])
+    visited: Set[Partition] = {partition}
     queue: Deque[Partition] = deque([partition])
     while queue:
         p = queue.popleft()
@@ -588,8 +583,8 @@ class Partitioner:
             if node.target == operator.__getitem__:
                 continue
             input_nodes: Dict[Node, None] = {}
-            map_arg(node.args, lambda n: input_nodes.setdefault(n))
-            map_arg(node.kwargs, lambda n: input_nodes.setdefault(n))
+            map_arg(node.args, input_nodes.setdefault)
+            map_arg(node.kwargs, input_nodes.setdefault)
             # When a node has two or more output nodes,
             # it outputs its result to 'getitem' nodes.
             # Those 'getitem' nodes are the output node for this node.
@@ -1003,7 +998,7 @@ class Partitioner:
                 if cost < min_cost:
                     node_pair = [node, n1]
                     min_cost = cost
-            return cost, node_pair
+            return cost, node_pair  # type: ignore[possibly-undefined]
 
         # First use size_base_partition
         self.size_based_partition()

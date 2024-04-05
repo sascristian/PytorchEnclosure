@@ -9,6 +9,7 @@
 #include <c10/util/win32-headers.h>
 #include <fileapi.h>
 #include <io.h>
+#include <filesystem>
 #else
 #include <sys/file.h>
 #include <unistd.h>
@@ -16,19 +17,14 @@
 
 #include <chrono>
 #include <cstdio>
-#include <functional>
-#include <iostream>
-#include <limits>
-#include <sstream>
-#include <system_error>
 #include <thread>
 #include <utility>
 
 #include <c10/util/Exception.h>
 
-#define SYSASSERT(rv, ...)                                                 \
-  if ((rv) < 0) {                                                          \
-    throw std::system_error(errno, std::system_category(), ##__VA_ARGS__); \
+#define SYSASSERT(rv, ...)                                 \
+  if ((rv) < 0) {                                          \
+    C10_THROW_ERROR(DistStoreError, std::strerror(errno)); \
   }
 
 #ifdef _WIN32
@@ -154,6 +150,13 @@ class File {
       if (fd_ >= 0 || errno != ENOENT) {
         break;
       }
+#ifdef _WIN32
+      // if the parent folder doesn't exist it will never be able to create the
+      // file so we can skip the retry
+      if (!std::filesystem::exists(std::filesystem::path(path).parent_path())) {
+        break;
+      }
+#endif
       const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - start);
       if (timeout != c10d::Store::kNoTimeout && elapsed > timeout) {
@@ -252,7 +255,7 @@ off_t refresh(
     File& file,
     off_t pos,
     std::unordered_map<std::string, std::vector<uint8_t>>& cache,
-    const std::string deletePrefix) {
+    const std::string& deletePrefix) {
   auto size = file.size();
   if (size != pos) {
     std::string tmpKey;
@@ -421,7 +424,7 @@ int64_t FileStore::getNumKeys() {
   File file(path_, O_RDONLY, timeout_);
   auto lock = file.lockShared();
   pos_ = refresh(file, pos_, cache_, deletePrefix_);
-  return cache_.size();
+  return static_cast<int64_t>(cache_.size());
 }
 
 bool FileStore::deleteKey(const std::string& key) {

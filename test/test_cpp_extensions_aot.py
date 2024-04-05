@@ -37,6 +37,7 @@ except ImportError as e:
     ) from e
 
 
+@torch.testing._internal.common_utils.markDynamoStrictTest
 class TestCppExtensionAOT(common.TestCase):
     """Tests ahead-of-time cpp extensions
 
@@ -84,6 +85,19 @@ class TestCppExtensionAOT(common.TestCase):
 
         # 2 * sigmoid(0) = 2 * 0.5 = 1
         self.assertEqual(z, torch.ones_like(z))
+
+    @unittest.skipIf(not torch.backends.mps.is_available(), "MPS not found")
+    def test_mps_extension(self):
+        import torch_test_cpp_extension.mps as mps_extension
+
+        tensor_length = 100000
+        x = torch.randn(tensor_length, device="cpu", dtype=torch.float32)
+        y = torch.randn(tensor_length, device="cpu", dtype=torch.float32)
+
+        cpu_output = mps_extension.get_cpu_add_output(x, y)
+        mps_output = mps_extension.get_mps_add_output(x.to("mps"), y.to("mps"))
+
+        self.assertEqual(cpu_output, mps_output.to("cpu"))
 
     @common.skipIfRocm
     @unittest.skipIf(common.IS_WINDOWS, "Windows not supported")
@@ -137,6 +151,7 @@ class TestCppExtensionAOT(common.TestCase):
         self.assertEqual(test, ref)
 
 
+@torch.testing._internal.common_utils.markDynamoStrictTest
 class TestPybindTypeCasters(common.TestCase):
     """Pybind tests for ahead-of-time cpp extensions
 
@@ -191,11 +206,12 @@ class TestPybindTypeCasters(common.TestCase):
         In these cases we expect to get exactly one function per python type.
         """
         # Verify that all functions have the same return type.
-        union_type = set(self.expected_return_type(f) for f in funcs)
+        union_type = {self.expected_return_type(f) for f in funcs}
         assert len(union_type) == 1
         union_type = union_type.pop()
         self.assertIs(Union, get_origin(union_type))
-        expected_types = set(get_args(union_type))
+        # SymInt is inconvenient to test, so don't require it
+        expected_types = set(get_args(union_type)) - {torch.SymInt}
         for func in funcs:
             val = func()
             for tp in expected_types:
@@ -219,7 +235,7 @@ class TestPybindTypeCasters(common.TestCase):
             cpp_extension.get_tensor,
         ]
         union_functions = [
-            [cpp_extension.get_symint, cpp_extension.get_symint_symbolic],
+            [cpp_extension.get_symint],
         ]
         for func in functions:
             with self.subTest(msg=f"check {func.__name__}"):
@@ -229,12 +245,14 @@ class TestPybindTypeCasters(common.TestCase):
                 self.check_union(funcs)
 
 
+@torch.testing._internal.common_utils.markDynamoStrictTest
 class TestORTTensor(common.TestCase):
     def test_unregistered(self):
         a = torch.arange(0, 10, device='cpu')
         with self.assertRaisesRegex(RuntimeError, "Could not run"):
             b = torch.arange(0, 10, device='ort')
 
+    @skipIfTorchDynamo("dynamo cannot model ort device")
     def test_zeros(self):
         a = torch.empty(5, 5, device='cpu')
         self.assertEqual(a.device, torch.device('cpu'))
@@ -279,10 +297,11 @@ class TestORTTensor(common.TestCase):
         self.assertEqual(grad[0].shape, input.shape)
 
 
+@torch.testing._internal.common_utils.markDynamoStrictTest
 class TestRNGExtension(common.TestCase):
 
     def setUp(self):
-        super(TestRNGExtension, self).setUp()
+        super().setUp()
 
     @skipIfTorchDynamo("https://github.com/pytorch/torchdynamo/issues/1991")
     def test_rng(self):
@@ -315,6 +334,7 @@ class TestRNGExtension(common.TestCase):
         self.assertEqual(rng_extension.getInstanceCount(), 0)
 
 
+@torch.testing._internal.common_utils.markDynamoStrictTest
 @unittest.skipIf(not TEST_CUDA, "CUDA not found")
 class TestTorchLibrary(common.TestCase):
 

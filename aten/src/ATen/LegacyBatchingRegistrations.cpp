@@ -1,9 +1,9 @@
 #include <torch/library.h>
-#include <ATen/RedispatchFunctions.h>
+#include <ATen/ATen.h>
 #include <ATen/LegacyVmapTransforms.h>
 #include <ATen/LegacyBatchedFallback.h>
+#include <ATen/RedispatchFunctions.h>
 #include <ATen/native/ResizeCommon.h>
-#include <ATen/ATen.h>
 #include <ATen/core/IListRef.h>
 #include <c10/util/irange.h>
 #include <c10/core/SymIntArrayRef.h>
@@ -54,6 +54,8 @@ namespace at {
 // Ideally batching rules in eager mode vs TorchScript would look pretty similar,
 // if not use the same mechanism. In order to accomplish that we might have to
 // do some refactoring.
+
+namespace{
 
 // PyTorch allows operations to specify dim 0 and dim -1 on a scalar tensor.
 static bool is_allowed_dim_on_scalar_tensor(int64_t dim) {
@@ -1069,7 +1071,7 @@ Tensor comparison_pointwise_batching_rule(const Tensor& self, const Tensor& othe
   auto result = Func(physical_args[0].tensor(), physical_args[1].tensor());
   return physical_args[0].getPhysicalToLogicalMap().apply(result);
 }
-
+}
 TORCH_LIBRARY_IMPL(_, Batched, m) {
   m.fallback(torch::CppFunction::makeFromBoxedFunction<&batchedTensorForLoopFallback>());
 }

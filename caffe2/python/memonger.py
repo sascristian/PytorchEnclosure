@@ -41,8 +41,7 @@ def share_grad_blobs(
         name = str(b)
         # Note: need to look at _{namescope} pattern as it matches
         # to handle the auto-split gradients
-        return name.endswith("_grad") and (name.startswith(namescope) or
-            name.startswith("_" + namescope)) and name not in param_grads
+        return name.endswith("_grad") and (name.startswith((namescope, "_" + namescope))) and name not in param_grads
 
     def is_grad_op(op):
         # TODO: something smarter
@@ -649,7 +648,7 @@ def compute_assignments_dp(ranges_sorted, init_assignment, counter=None):
         # Try to put 'find_range' in a new assignment
         best_candidates.append(prev_best_assignment + [[find_range]])
 
-        ret = min(best_candidates, key=lambda x: get_memory_usage(x))
+        ret = min(best_candidates, key=get_memory_usage)
         return ret
 
     if not counter:

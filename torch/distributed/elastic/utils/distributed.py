@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torch.distributed.elastic.utils.logging import get_logger
 
 
-log = get_logger()
+logger = get_logger(__name__)
 
 _ADDRESS_IN_USE = "Address already in use"
 _SOCKET_TIMEOUT = "Socket Timeout"
@@ -37,7 +37,7 @@ def create_c10d_store(
         )
 
     if server_port != -1:
-        log.info(f"sever_port: {server_port}, specified, ignoring retries")
+        logger.info("sever_port: %s, specified, ignoring retries", server_port)
 
     # only retry when server_port is NOT static
     attempt = retries if server_port == -1 else 1
@@ -47,11 +47,12 @@ def create_c10d_store(
         else:
             port = get_free_port()
 
-        log.info(
-            f"Creating c10d store on {server_addr}:{port}\n"
-            f"  world_size  : {world_size}\n"
-            f"  is_server   : {is_server}\n"
-            f"  timeout(sec): {timeout}\n"
+        logger.info(
+            "Creating c10d store on %s:%s\n"
+            "  world_size  : %s\n"
+            "  is_server   : %s\n"
+            "  timeout(sec): %s\n",
+            server_addr, port, world_size, is_server, timeout
         )
 
         try:
@@ -66,7 +67,7 @@ def create_c10d_store(
             # skips full rank check when we don't have to wait for all workers
             if wait_for_workers:
                 _check_full_rank(store, world_size)
-            log.info("Successfully created c10d store")
+            logger.info("Successfully created c10d store")
             return store
         except RuntimeError as e:
             # this is brittle, but the underlying exception type is not properly pybinded
@@ -76,8 +77,8 @@ def create_c10d_store(
             # TODO properly map the exceptions in pybind (c10d/init.cpp)
             if str(e) == _ADDRESS_IN_USE:  # this will only happen on the server
                 if attempt < retries:
-                    log.warning(
-                        f"port: {port} already in use, attempt: [{attempt}/{retries}]"
+                    logger.warning(
+                        "port: %s already in use, attempt: [%s/%s]", port, attempt, retries
                     )
                     attempt += 1
                 else:
@@ -139,5 +140,5 @@ def get_socket_with_port() -> socket.socket:
             return s
         except OSError as e:
             s.close()
-            log.info("Socket creation attempt failed.", exc_info=e)
+            logger.warning("Socket creation attempt failed.", exc_info=e)
     raise RuntimeError("Failed to create a socket")

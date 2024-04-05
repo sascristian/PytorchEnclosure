@@ -181,13 +181,6 @@ Tensor mkldnn_avg_pool3d_backward(
   TORCH_CHECK(false, "mkldnn_avg_pool3d_backward: ATen not compiled with MKLDNN support");
 }
 
-Tensor& mkldnn_adaptive_avg_pool2d_backward_out(
-    Tensor& grad_input,
-    const Tensor& grad_output,
-    const Tensor& input) {
-  TORCH_CHECK(false, "mkldnn_adaptive_avg_pool2d_backward_out: ATen not compiled with MKLDNN support");
-}
-
 Tensor mkldnn_adaptive_avg_pool2d_backward(
     const Tensor& grad_output,
     const Tensor& input) {
@@ -649,7 +642,7 @@ Tensor& mkldnn_avg_pool3d_backward_out(const Tensor & grad_output,
 Tensor mkldnn_adaptive_avg_pool2d_backward(
     const Tensor& grad_output,
     const Tensor& input) {
-  TORCH_CHECK(input.dim() == 4, "mkldnn_adaptive_avg_pool2d: Input is expected a 4D tenosor");
+  TORCH_CHECK(input.dim() == 4, "mkldnn_adaptive_avg_pool2d: Input is expected a 4D tensor");
 
   auto output_size_vec = grad_output.sizes();
   std::vector<int64_t> kernel_size(input.dim() - 2);
@@ -672,13 +665,6 @@ Tensor mkldnn_adaptive_avg_pool2d_backward(
       /*dilation*/{1, 1},
       false,
       /*algo*/ ideep::algorithm::pooling_avg_exclude_padding);
-}
-
-Tensor& mkldnn_adaptive_avg_pool2d_backward_out(
-    Tensor& grad_input,
-    const Tensor& grad_output,
-    const Tensor& input) {
-  TORCH_CHECK(false, "mkldnn_adaptive_avg_pool2d_backward_out: in-place mkldnn operations are not supported yet");
 }
 
 } // namespace native

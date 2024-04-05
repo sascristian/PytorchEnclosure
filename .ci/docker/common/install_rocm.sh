@@ -61,13 +61,31 @@ install_ubuntu() {
                    rocprofiler-dev \
                    roctracer-dev
 
-    # precompiled miopen kernels added in ROCm 3.5; search for all unversioned packages
+    # precompiled miopen kernels added in ROCm 3.5, renamed in ROCm 5.5
+    # search for all unversioned packages
     # if search fails it will abort this script; use true to avoid case where search fails
-    MIOPENKERNELS=$(apt-cache search --names-only miopenkernels | awk '{print $1}' | grep -F -v . || true)
-    if [[ "x${MIOPENKERNELS}" = x ]]; then
-      echo "miopenkernels package not available"
+    if [[ $(ver $ROCM_VERSION) -ge $(ver 5.5) ]]; then
+        MIOPENHIPGFX=$(apt-cache search --names-only miopen-hip-gfx | awk '{print $1}' | grep -F -v . || true)
+        if [[ "x${MIOPENHIPGFX}" = x ]]; then
+          echo "miopen-hip-gfx package not available" && exit 1
+        else
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated ${MIOPENHIPGFX}
+        fi
     else
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated ${MIOPENKERNELS}
+        MIOPENKERNELS=$(apt-cache search --names-only miopenkernels | awk '{print $1}' | grep -F -v . || true)
+        if [[ "x${MIOPENKERNELS}" = x ]]; then
+          echo "miopenkernels package not available" && exit 1
+        else
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated ${MIOPENKERNELS}
+        fi
+    fi
+
+    # ROCm 6.0 had a regression where journal_mode was enabled on the kdb files resulting in permission errors at runtime
+    if [[ $(ver $ROCM_VERSION) -ge $(ver 6.0) ]]; then
+        for kdb in /opt/rocm/share/miopen/db/*.kdb
+        do
+            sqlite3 $kdb "PRAGMA journal_mode=off; PRAGMA VACUUM;"
+        done
     fi
 
     # Cleanup
@@ -122,6 +140,32 @@ install_centos() {
                    rccl \
                    rocprofiler-dev \
                    roctracer-dev
+
+  # precompiled miopen kernels; search for all unversioned packages
+  # if search fails it will abort this script; use true to avoid case where search fails
+  if [[ $(ver $ROCM_VERSION) -ge $(ver 5.5) ]]; then
+      MIOPENHIPGFX=$(yum -q search miopen-hip-gfx | grep miopen-hip-gfx | awk '{print $1}'| grep -F kdb. || true)
+      if [[ "x${MIOPENHIPGFX}" = x ]]; then
+        echo "miopen-hip-gfx package not available" && exit 1
+      else
+        yum install -y ${MIOPENHIPGFX}
+      fi
+  else
+      MIOPENKERNELS=$(yum -q search miopenkernels | grep miopenkernels- | awk '{print $1}'| grep -F kdb. || true)
+      if [[ "x${MIOPENKERNELS}" = x ]]; then
+        echo "miopenkernels package not available" && exit 1
+      else
+        yum install -y ${MIOPENKERNELS}
+      fi
+  fi
+
+  # ROCm 6.0 had a regression where journal_mode was enabled on the kdb files resulting in permission errors at runtime
+  if [[ $(ver $ROCM_VERSION) -ge $(ver 6.0) ]]; then
+      for kdb in /opt/rocm/share/miopen/db/*.kdb
+      do
+          sqlite3 $kdb "PRAGMA journal_mode=off; PRAGMA VACUUM;"
+      done
+  fi
 
   # Cleanup
   yum clean all

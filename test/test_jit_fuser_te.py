@@ -21,7 +21,8 @@ torch._C._jit_set_profiling_executor(True)
 torch._C._get_graph_executor_optimize(True)
 
 from torch.testing._internal.common_utils import run_tests, ProfilingMode, GRAPH_EXECUTOR, \
-    enable_profiling_mode_for_profiling_tests, slowTest, skipIfTorchDynamo
+    enable_profiling_mode_for_profiling_tests, slowTest, skipIfTorchDynamo, TEST_WITH_ASAN, \
+    TEST_WITH_ROCM, IS_FBCODE
 from torch.testing._internal.jit_utils import JitTestCase, \
     RUN_CUDA, RUN_CUDA_HALF, RUN_CUDA_MULTI_GPU, warmup_backward, set_fusion_group_inlining, \
     clone_inputs, get_traced_sample_variant_pairs, TensorExprTestOptions, NoTracerWarnContextManager
@@ -46,7 +47,7 @@ LLVM_ENABLED = torch._C._llvm_enabled()
 autograd_check_set = {'aten::__is__', 'prim::AutogradAllNonZero', 'prim::AutogradAllZero', 'prim::ListConstruct'}
 
 def strip_profiling_nodes(nodes):
-    profiling_opcodes = set(['prim::BailoutTemplate', 'prim::BailOut'])
+    profiling_opcodes = {'prim::BailoutTemplate', 'prim::BailOut'}
     return [n for n in nodes if n.kind() not in profiling_opcodes]
 
 def warmup_forward(f, *args, profiling_count=2):
@@ -79,6 +80,7 @@ def inline_fusion_groups():
         yield
     finally:
         torch._C._debug_set_fusion_group_inlining(old_inlining)
+
 
 class TestTEFuser(JitTestCase):
     def setUp(self):
@@ -189,7 +191,7 @@ class TestTEFuser(JitTestCase):
             return x2.sum()
 
         with texpr_reductions_enabled():
-            a = torch.tensor(list(x for x in range(0, 15)), dtype=torch.float, device='cpu')
+            a = torch.tensor(list(range(0, 15)), dtype=torch.float, device='cpu')
             a = a.reshape(5, 3)
             scripted = self.checkScript(func, (a,))
             self.assertLastGraphAllFused()
@@ -205,7 +207,7 @@ class TestTEFuser(JitTestCase):
             return x.sum((-2, )) * 2
 
         with texpr_reductions_enabled():
-            a = torch.tensor(list(x for x in range(0, 15)), dtype=torch.float, device='cpu')
+            a = torch.tensor(list(range(0, 15)), dtype=torch.float, device='cpu')
             a = a.reshape(5, 3)
             scripted = self.checkScript(func, (a,))
             self.assertLastGraphAllFused()
@@ -217,7 +219,7 @@ class TestTEFuser(JitTestCase):
             return x.sum((0, ), keepdim=True, dtype=torch.double) * 2
 
         with texpr_reductions_enabled():
-            a = torch.tensor(list(x for x in range(0, 15)), dtype=torch.float, device='cpu')
+            a = torch.tensor(list(range(0, 15)), dtype=torch.float, device='cpu')
             a = a.reshape(5, 3)
 
             self.checkScript(func, (a,))
@@ -969,7 +971,7 @@ class TestTEFuser(JitTestCase):
             __constants__ = ['d']
 
             def __init__(self):
-                super(M, self).__init__()
+                super().__init__()
                 self.d = torch.device('cuda')
 
             @torch.jit.script_method
@@ -1236,7 +1238,7 @@ class TestTEFuser(JitTestCase):
 
         class MyMod(torch.nn.Module):
             def __init__(self, dtype):
-                super(MyMod, self).__init__()
+                super().__init__()
                 self.dtype = dtype
 
             def forward(self, x):
@@ -1286,7 +1288,7 @@ class TestTEFuser(JitTestCase):
                 self.assertLastGraphAllFused()
             except Exception as e:
                 raise RuntimeError(
-                    " ".join(["Failed:", str(self_dtype), op.__name__, device, str(size)])
+                    " ".join(["Failed:", str(self_dtype), op.__name__, device, str(size)])  # noqa: F821
                 ) from e
 
     def test_isnan(self):
@@ -1593,7 +1595,7 @@ class TestTEFuser(JitTestCase):
                 t = torch.jit.trace(fn, (x, y))
                 t(x, y)
                 self.assertEqual(ref, t(x, y))
-                if not str(size) in skip_is_fused_check_sizes:
+                if str(size) not in skip_is_fused_check_sizes:
                     self.assertAllFused(t.graph_for(x, y))
             except Exception as e:
                 raise RuntimeError(
@@ -1674,7 +1676,7 @@ class TestTEFuser(JitTestCase):
                 self.assertEqual(ref, t(x))
             except Exception as e:
                 raise RuntimeError(
-                    "Failed: {} {} {} {}".format(dtype, op.__name__, device, scalar)
+                    f"Failed: {dtype} {op.__name__} {device} {scalar}"
                 ) from e
 
     def test_binary_pow(self):
@@ -1921,6 +1923,7 @@ class TestTEFuser(JitTestCase):
             t = torch.rand(8, dtype=torch.float, device=device)
             scripted = self.checkScript(eager, (t, t, t, t, 0.1))
 
+    @skipIfTorchDynamo("too slow")
     def test_chunk_mul_one(self):
         if self.dynamic_shapes:
             self.skipTest("TODO: chunk dynamic shapes")
@@ -2040,7 +2043,7 @@ class TestTEFuser(JitTestCase):
         sets = []
         for i in range(0, len(indices) + 1):
             for subset in combinations(indices, i):
-                sets.append(subset)
+                sets.append(subset)  # noqa: PERF402
 
         for set in sets:
             size = [2, 3, 4, 5]
@@ -2197,6 +2200,9 @@ class TestTEFuser(JitTestCase):
             x = torch.ones((8, 1))
             torch.testing.assert_close(eager(x), script(x))
 
+    @skipIfTorchDynamo("too slow")
+    @unittest.skipIf(TEST_WITH_ASAN, "takes 10+ minutes on asan")
+    @unittest.skipIf(TEST_WITH_ROCM, "Tensor-likes are not close for nans")
     def test_batch_norm(self):
         def test(fn, args):
             trace = torch.jit.trace(fn, args)
@@ -2676,7 +2682,6 @@ def f({', '.join(param_names)}):
             self.assertEqual(kernel.fallback(tuple(param_values)), correct_val)
 
     @onlyCPU
-    @skipIfTorchDynamo("TorchDynamo fails here for unknown reasons")
     @unittest.skipIf(not LLVM_ENABLED, "Compiles with TensorExprKernel")
     @ops([op for op in op_db if get_name(op) in works_list], allowed_dtypes=(torch.float,))
     def test_working(self, device, dtype, op):
@@ -2701,7 +2706,7 @@ def f({', '.join(param_names)}):
             return
         try:
             with warnings.catch_warnings():
-                warnings.simplefilter('ignore', TracerWarning)
+                warnings.simplefilter('ignore', TracerWarning)  # noqa: F821
                 self.te_compile(device, dtype, op)
         except Exception as e:
             pass
@@ -2735,7 +2740,8 @@ def f({', '.join(param_names)}):
             # if the CU is not cleared.
             torch.jit._state._python_cu.drop_all_functions()
 
-only_for = ("cpu", "cuda")
+# CPU fuser not currently used in fbcode
+only_for = ("cuda") if IS_FBCODE else ("cpu", "cuda")
 instantiate_device_type_tests(TestNNCOpInfo, globals(), only_for=only_for)
 
 # Purpose of this class is to allow super() calls. (See TestNNCOpInfoParent)

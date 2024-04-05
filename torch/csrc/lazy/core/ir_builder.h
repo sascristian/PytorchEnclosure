@@ -127,19 +127,21 @@ static inline NodePtr MakeSizeDiv(const Value& a, const Value& b) {
 }
 
 inline Value GetSymIntValue(c10::SymInt a) {
-  return Value(
-      a.is_symbolic()
-          ? dynamic_cast<torch::lazy::SymNodeImpl*>(a.toSymNodeImpl().get())
-                ->node_
-          : MakeScalar(a.as_int_unchecked(), at::kLong),
-      0);
+  if (auto ma = a.maybe_as_int()) {
+    return Value(MakeScalar(*ma, at::kLong), 0);
+  } else {
+    return Value(
+        dynamic_cast<torch::lazy::SymNodeImpl*>(a.toSymNodeImplUnowned())
+            ->node_,
+        0);
+  }
 }
 
 // TODO: this should return Value
 inline std::vector<int64_t> GetSymIntArrayRefValue(c10::SymIntArrayRef arr) {
   std::vector<int64_t> r;
   for (const auto& a : arr) {
-    r.emplace_back(a.expect_int());
+    r.emplace_back(a.guard_int(__FILE__, __LINE__));
   }
   return r;
 }

@@ -27,7 +27,7 @@ class LinearReLU(nnq.Linear):
         >>> print(output.size())
         torch.Size([128, 30])
     """
-    _FLOAT_MODULE = nni.LinearReLU
+    _FLOAT_MODULE = nni.LinearReLU  # type: ignore[assignment]
 
     def __init__(self, in_features, out_features, bias=True, dtype=torch.qint8):
         super().__init__(in_features, out_features, bias, dtype)
@@ -41,7 +41,7 @@ class LinearReLU(nnq.Linear):
 
     @classmethod
     def from_float(cls, mod):
-        return super(LinearReLU, cls).from_float(mod)
+        return super().from_float(mod)
 
     @classmethod
     def from_reference(cls, ref_linear_relu, output_scale, output_zero_point):
@@ -63,7 +63,7 @@ class LinearLeakyReLU(nnq.Linear):
         >>> print(output.size())
         torch.Size([128, 30])
     """
-    _FLOAT_MODULE = nni.LinearLeakyReLU
+    _FLOAT_MODULE = nni.LinearLeakyReLU  # type: ignore[assignment]
 
     def __init__(self, in_features, out_features, negative_slope, bias=True, dtype=torch.qint8):
         super().__init__(in_features, out_features, bias, dtype)
@@ -131,7 +131,7 @@ class LinearTanh(nnq.Linear):
         >>> print(output.size())
         torch.Size([128, 30])
     """
-    _FLOAT_MODULE = nni.LinearTanh
+    _FLOAT_MODULE = nni.LinearTanh  # type: ignore[assignment]
 
     def __init__(self, in_features, out_features, bias=True, dtype=torch.qint8):
         super().__init__(in_features, out_features, bias, dtype)

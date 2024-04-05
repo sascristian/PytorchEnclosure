@@ -9,6 +9,7 @@
 #include <ATen/native/cpu/utils.h>
 #include <ATen/native/Resize.h>
 #include <c10/util/SmallBuffer.h>
+#include <ATen/TensorSubclassLikeUtils.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -32,8 +33,7 @@
 
 #include <utility>
 
-namespace at {
-namespace meta {
+namespace at::meta {
 TORCH_META_FUNC(nll_loss_forward)
 (const Tensor& self,
  const Tensor& target,
@@ -130,9 +130,9 @@ TORCH_META_FUNC(nll_loss_backward)
 
   set_output_raw_strided(0, self.sizes(), {}, self.options().memory_format(LEGACY_CONTIGUOUS_MEMORY_FORMAT));
 }
-} // namespace meta
+} // namespace at::meta
 
-namespace native {
+namespace at::native {
 
 namespace {
 
@@ -147,7 +147,11 @@ inline Tensor optional_contiguous(const Tensor& source) {
 // or nullptr if the tensor is undefined.
 template <typename scalar_t>
 inline scalar_t* optional_data(const Tensor& source) {
-  return source.defined() ? source.data_ptr<scalar_t>() : nullptr;
+  if constexpr (std::is_const<scalar_t>::value) {
+    return source.defined() ? source.const_data_ptr<scalar_t>() : nullptr;
+  } else {
+    return source.defined() ? source.data_ptr<scalar_t>() : nullptr;
+  }
 }
 
 template <typename scalar_t, typename target_t>
@@ -166,14 +170,14 @@ static void nll_loss_out_frame(
   *total_weight_data = 0;
 
   auto weight_contiguous = optional_contiguous(weight);
-  const scalar_t* weight_data = optional_data<scalar_t>(weight_contiguous);
+  const scalar_t* weight_data = optional_data<const scalar_t>(weight_contiguous);
 
   if (reduction == Reduction::None && n_dims == 2) {
     const auto batch_size = input.size(0);
     at::native::resize_output(output, {batch_size});
 
-    auto input_acc = input.accessor<scalar_t, 2>();
-    auto target_acc = target.accessor<target_t, 1>();
+    auto input_acc = input.accessor<const scalar_t, 2>();
+    auto target_acc = target.accessor<const target_t, 1>();
     auto output_acc = output.accessor<scalar_t, 1>();
 
     at::parallel_for(0, batch_size, 0, [&](int64_t start, int64_t end) {
@@ -219,8 +223,8 @@ static void nll_loss_out_frame(
   auto input_contiguous = input.contiguous();
   auto target_contiguous = target.contiguous();
 
-  const scalar_t* input_data = input_contiguous.data_ptr<scalar_t>();
-  const target_t* target_data = target_contiguous.data_ptr<target_t>();
+  const scalar_t* input_data = input_contiguous.const_data_ptr<scalar_t>();
+  const target_t* target_data = target_contiguous.const_data_ptr<target_t>();
 
   const int64_t ndim = input.dim();
   const int64_t batch_size = ndim == 1 ? 1 : input.size(0);
@@ -478,7 +482,7 @@ TORCH_IMPL_FUNC(nll_loss_backward_out_cpu)
       total_weight);
 }
 
-Tensor cross_entropy_loss_prob_target(
+static Tensor cross_entropy_loss_prob_target(
     const Tensor& self,
     const Tensor& target_,
     const Tensor& weight,
@@ -546,7 +550,7 @@ Tensor cross_entropy_loss_prob_target(
   }
 }
 
-Tensor cross_entropy_loss_label_smoothing(
+static Tensor cross_entropy_loss_label_smoothing(
     const Tensor& self,
     const Tensor& target,
     const Tensor& weight,
@@ -557,7 +561,7 @@ Tensor cross_entropy_loss_label_smoothing(
     auto input = at::log_softmax(self, class_dim, self.scalar_type());
     auto nllloss = at::nll_loss_nd_symint(input, target, weight, reduction, ignore_index);
 
-    auto n_classes = input.size(class_dim);
+    auto n_classes = input.sym_size(class_dim);
 
     Tensor smooth_loss;
     if (weight.defined()) {
@@ -573,17 +577,31 @@ Tensor cross_entropy_loss_label_smoothing(
     }
 
     auto ignore_mask = target == std::move(ignore_index);
-    smooth_loss.index_put_({ignore_mask}, 0.0);
+    smooth_loss.masked_fill_(ignore_mask, 0.0);
 
     Tensor ret;
     switch (reduction) {
       case Reduction::Mean:
         if (weight.defined()) {
-          // TODO: This code can path can be removed if #61309 is resolved
-          // loss is normalized by the weights to be consistent with nll_loss_nd
-          ret = smooth_loss.sum() / weight.gather(0, target.masked_select(~ignore_mask).flatten()).sum();
+          if (isTensorSubclassLike(weight)){
+            // we will collect weights from 0 index which is always valid
+            // and mask them out if they are ignored
+            auto filtered_target = target.masked_fill(ignore_mask, 0);
+            auto tgt_weights = weight.gather(0, filtered_target.flatten());
+            auto weight_sum =
+                tgt_weights.masked_fill_(ignore_mask.flatten(), 0).sum();
+            ret = smooth_loss.sum() / weight_sum;
+          } else {
+            // TODO: This code can path can be removed if #61309 is resolved
+            // loss is normalized by the weights to be consistent with
+            // nll_loss_nd
+            ret = smooth_loss.sum() /
+                weight.gather(0, target.masked_select(~ignore_mask).flatten())
+                    .sum();
+          }
         } else {
-          ret = smooth_loss.masked_select(~ignore_mask).mean();
+          auto true_mask = ~ignore_mask;
+          ret = smooth_loss.sum()/ true_mask.sum();
         }
         break;
       case Reduction::Sum:
@@ -653,7 +671,7 @@ Tensor nll_loss_symint(const Tensor & self, const Tensor & target, const c10::op
 }
 
 // Duplicate of above code for non-symbolic ints. Kept for BC purposes and to minimize breakages.
-Tensor nll_loss(const Tensor & self, const Tensor & target, const c10::optional<Tensor>& weight_opt, int64_t reduction, int64_t ignore_index) {
+static Tensor nll_loss(const Tensor & self, const Tensor & target, const c10::optional<Tensor>& weight_opt, int64_t reduction, int64_t ignore_index) {
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> weight_maybe_owned = at::borrow_from_optional_tensor(weight_opt);
   const Tensor& weight = *weight_maybe_owned;
@@ -706,12 +724,12 @@ Tensor nll_loss_nd_symint(
     input_ = input_.contiguous();
     target_ = target_.contiguous();
     // support empty batches, see #15870
-    if (input_.numel() > 0) {
+    if (input_.sym_numel() > 0) {
       input_ = input_.view_symint({n, std::move(c), 1, -1});
     } else {
       input_ = input_.view_symint({n, std::move(c), 0, 0});
     }
-    if (target_.numel() > 0) {
+    if (target_.sym_numel() > 0) {
       target_ = target_.view_symint({std::move(n), 1, -1});
     } else {
       target_ = target_.view_symint({std::move(n), 0, 0});
@@ -727,5 +745,4 @@ Tensor nll_loss_nd_symint(
   return ret;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

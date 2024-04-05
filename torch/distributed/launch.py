@@ -1,4 +1,6 @@
 r"""
+Module ``torch.distributed.launch``.
+
 ``torch.distributed.launch`` is a module that spawns up multiple distributed
 training processes on each of the training nodes.
 
@@ -13,7 +15,7 @@ each distributed process will be operating on a single GPU. This can achieve
 well-improved single-node training performance. It can also be used in
 multi-node distributed training, by spawning up multiple processes on each node
 for well-improved multi-node distributed training performance as well.
-This will especially be benefitial for systems with multiple Infiniband
+This will especially be beneficial for systems with multiple Infiniband
 interfaces that have direct-GPU support, since all of them can be utilized for
 aggregated communication bandwidth.
 
@@ -144,13 +146,9 @@ will not pass ``--local-rank`` when you specify this flag.
 
 """
 
-import logging
 import warnings
 
 from torch.distributed.run import get_args_parser, run
-
-
-logger = logging.getLogger(__name__)
 
 
 def parse_args(args):

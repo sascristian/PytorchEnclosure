@@ -17,6 +17,7 @@
 #include <ATen/ops/_log_softmax.h>
 #include <ATen/ops/_log_softmax_backward_data_native.h>
 #include <ATen/ops/_log_softmax_native.h>
+#include <ATen/ops/_masked_softmax_backward_native.h>
 #include <ATen/ops/_masked_softmax_native.h>
 #include <ATen/ops/_softmax.h>
 #include <ATen/ops/_softmax_backward_data_native.h>
@@ -35,8 +36,7 @@
 #include <c10/macros/Macros.h>
 #include <c10/util/irange.h>
 
-namespace at {
-namespace meta {
+namespace at::meta {
 TORCH_META_FUNC(_softmax)
 (const Tensor& input, const int64_t dim, const bool half_to_float) {
   int64_t dim_ = maybe_wrap_dim(dim, input.dim());
@@ -144,9 +144,9 @@ TORCH_META_FUNC(_log_softmax_backward_data)
 
   set_output_raw_strided(0, grad.sizes(), {}, grad_input_options);
 }
-}
+} // namespace at::meta
 
-namespace native {
+namespace at::native {
 namespace {
 
 template <typename scalar_t, bool LogSoftMax, bool MaskedSoftMax = false>
@@ -440,7 +440,7 @@ TORCH_IMPL_FUNC(log_softmax_backward_cpu_out) (
   }
 }
 
-Tensor softmax(const Tensor& input_, const int64_t dim_) {
+static Tensor softmax(const Tensor& input_, const int64_t dim_) {
   auto result = [&]() {
     NoNamesGuard guard;
     return at::_softmax(input_, dim_, false);
@@ -505,7 +505,7 @@ Tensor special_softmax(const Tensor& input_, const int64_t dim_, c10::optional<S
   return at::softmax(input_, dim_, dtype);
 }
 
-Tensor log_softmax(const Tensor& input_, const int64_t dim_) {
+static Tensor log_softmax(const Tensor& input_, const int64_t dim_) {
   auto result = [&]() {
     NoNamesGuard guard;
     return at::_log_softmax(input_, dim_, false);
@@ -637,8 +637,8 @@ Tensor masked_softmax_cpu(const Tensor& input_, const Tensor& mask_, const c10::
     input = input.view(1);
   }
 
-  AT_DISPATCH_FLOATING_TYPES_AND(
-      at::ScalarType::BFloat16, input.scalar_type(), "masked_softmax", [&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::BFloat16, at::ScalarType::Half, input.scalar_type(), "masked_softmax", [&] {
         host_softmax<
             scalar_t,
             false /* LogSoftMax */,
@@ -670,8 +670,8 @@ Tensor masked_softmax_backward_cpu(
   mask = mask.dim() == 0 ? mask.view(1) : mask;
 
   Tensor grad_input = at::empty_like(grad, grad.options());
-  AT_DISPATCH_FLOATING_TYPES_AND(
-      at::ScalarType::BFloat16, grad.scalar_type(), "masked_softmax_backward", [&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::BFloat16, at::ScalarType::Half, grad.scalar_type(), "masked_softmax_backward", [&] {
         host_softmax_backward<
             scalar_t,
             false /* LogSoftMax */,
@@ -679,5 +679,4 @@ Tensor masked_softmax_backward_cpu(
       });
   return grad_input;
 }
-}
-}
+} // namespace at::native

@@ -24,7 +24,7 @@ namespace autograd {
 // maintain the logic equality of this file and the python file together if one
 // changes.
 // TODO: Make the Python API above to just call this C++ API.
-variable_list _make_grads(
+static variable_list _make_grads(
     const variable_list& outputs,
     const variable_list& grad_outputs) {
   size_t num_tensors = outputs.size();
@@ -37,6 +37,10 @@ variable_list _make_grads(
         TORCH_CHECK(
             output.numel() == 1,
             "grad can be implicitly created only for scalar outputs");
+        TORCH_CHECK(
+            c10::isFloatingType(output.scalar_type()),
+            "grad can be computed only for real scalar outputs but got ",
+            output.scalar_type());
         new_grads.emplace_back(
             at::ones_like(output, LEGACY_CONTIGUOUS_MEMORY_FORMAT));
       }
@@ -57,6 +61,10 @@ variable_list _make_grads(
           TORCH_CHECK(
               output.numel() == 1,
               "grad can be implicitly created only for scalar outputs");
+          TORCH_CHECK(
+              c10::isFloatingType(output.scalar_type()),
+              "grad can be computed only for real scalar outputs but got ",
+              output.scalar_type());
           new_grads.emplace_back(
               at::ones_like(output, LEGACY_CONTIGUOUS_MEMORY_FORMAT));
         }
@@ -80,7 +88,7 @@ variable_list _make_grads(
   }
   return new_grads;
 }
-variable_list run_backward(
+static variable_list run_backward(
     const variable_list& outputs,
     const variable_list& grad_outputs,
     bool keep_graph,
@@ -118,7 +126,9 @@ variable_list run_backward(
       }
       TORCH_CHECK(
           input.requires_grad(),
-          "One of the differentiated Tensors does not require grad");
+          "element ",
+          i,
+          " of the input tensors does not require grad");
       if (!grad_fn) {
         // See NOTE [ Autograd Unreachable Input ] for details
         output_edges.emplace_back(std::make_shared<Identity>(), 0);
@@ -141,7 +151,9 @@ variable_list run_backward(
     for (const auto i : c10::irange(num_inputs)) {
       TORCH_CHECK(
           grad_inputs[i].defined(),
-          "One of the "
+          "element ",
+          i,
+          "of the "
           "differentiated Tensors appears to not have been used "
           "in the graph. Set allow_unused=True if this is the "
           "desired behavior.");

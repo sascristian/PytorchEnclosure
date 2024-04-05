@@ -6,6 +6,7 @@
 #include <ATen/TensorUtils.h>
 #include <torch/library.h>
 #include <c10/util/irange.h>
+#include <c10/util/strides.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/ATen.h>
@@ -29,7 +30,29 @@
 namespace {
   void functionalizeFallback(const c10::OperatorHandle& op, c10::DispatchKeySet dispatchKeySet, torch::jit::Stack* stack) {
     const auto& schema = op.schema();
-    TORCH_INTERNAL_ASSERT(!schema.hasAnyAliasInfo(), "mutating and aliasing ops should all have codegen'd kernels");
+    // NB: auto_functionalize handles the case where outputs do not have alias info.
+    // This error message therefore suggests users to modify their custom op to the
+    // point where auto_functionalize works instead of asking them to try the raw
+    // functionalization API (because that is a bit difficult to use).
+    // If you're here and want to try the raw functionalizaton kernel approach,
+    // see https://gist.github.com/bdhirsh/7dadbf6296f8f7d1abcf4c482f438aaa
+    TORCH_CHECK(
+      !schema.hasAnyAliasInfo(),
+      "Found a custom (non-ATen) operator whose output has alias annotations: ",
+      op.schema(),
+      ". We only support functionalizing operators whose outputs do not have alias ",
+      "annotations (e.g. 'Tensor(a)' is a Tensor with an alias annotation whereas ",
+      "'Tensor' is a Tensor without. The '(a)' is the alias annotation). "
+      "The alias annotation specifies that the output ",
+      "Tensor shares storage with an input that has the same annotation. ",
+      "Please check if ",
+      "(1) the output needs to be an output (if not, don't return it), ",
+      "(2) if the output doesn't share storage with any inputs, then ",
+      "delete the alias annotation. ",
+      "(3) if the output indeed shares storage with an input, then add a ",
+      ".clone() before returning it to prevent storage sharing and then "
+      "delete the alias annotation. ",
+      "Otherwise, please file an issue on GitHub.");
     const auto num_arguments = schema.arguments().size();
     const auto arguments_begin = stack->size() - num_arguments;
     auto arguments = torch::jit::last(stack, num_arguments);
@@ -98,25 +121,11 @@ namespace {
   }
 }
 
-// Vanilla implementation to compute contiguous strides given some sizes.
-// Should probably refactor this into shared code (also used in TensorImpl.h)
-std::vector<int64_t> compute_contiguous_strides(c10::IntArrayRef sizes) {
-  auto n = sizes.size();
-  std::vector<int64_t> strides(n);
-  if (n == 0) return strides;
-
-  strides[n - 1] = 1;
-  for (int64_t i = n - 2; i >= 0; --i) {
-    strides[i] = strides[i+1] * sizes[i];
-  }
-  return strides;
-}
-
 // resize_() is special because:
 // - when we resize to a larger size, it acts as a mutation
 // - when we resize to a smaller size, it acts as a view
 // See Note [resize_ in Functionalization] for more dtails
-const at::Tensor & resize__functionalization(c10::DispatchKeySet dispatchKeySet, const at::Tensor & self, at::IntArrayRef size, c10::optional<at::MemoryFormat> memory_format) {
+static const at::Tensor & resize__functionalization(c10::DispatchKeySet dispatchKeySet, const at::Tensor & self, at::IntArrayRef size, c10::optional<at::MemoryFormat> memory_format) {
   // First unwrap the tensor arguments
   at::Tensor self_;
   if (at::functionalization::impl::isFunctionalTensor(self)) {
@@ -162,42 +171,54 @@ const at::Tensor & resize__functionalization(c10::DispatchKeySet dispatchKeySet,
   at::functionalization::ViewMeta view_meta = at::functionalization::ViewMeta(
     [reapply_views = reapply_views, size = size.vec()](const at::Tensor & base, int64_t mutated_view_idx) -> at::Tensor {
       if (reapply_views) {
-        return base.as_strided(size, compute_contiguous_strides(size));
+        return base.as_strided(size, c10::contiguous_strides(size));
       } else {
-        return at::as_strided_copy(base, size, compute_contiguous_strides(size));
+        return at::as_strided_copy(base, size, c10::contiguous_strides(size));
       }
     },
     [size = size.vec()](const at::Tensor & base, const at::Tensor & mutated_view, int64_t mutated_view_idx) -> at::Tensor {
-      return base.as_strided_scatter(mutated_view, size, compute_contiguous_strides(size));
+      return base.as_strided_scatter(mutated_view, size, c10::contiguous_strides(size));
     }
   );
-  at::functionalization::impl::mutate_view_meta(self, std::move(view_meta));
+  at::functionalization::impl::mutate_view_meta(self, view_meta);
   return self;
 }
 
 
-at::Tensor lift_functionalize(const at::Tensor & self) {
+static at::Tensor lift_functionalize(const at::Tensor & self) {
   TORCH_INTERNAL_ASSERT(!at::functionalization::impl::isFunctionalTensor(self));
   at::AutoDispatchSkipFunctionalize guard;
   auto out = at::lift(self);
   return at::functionalization::impl::to_functional_tensor(out);
 }
 
-at::Tensor lift_fresh_functionalize(const at::Tensor & self) {
-  TORCH_INTERNAL_ASSERT(!at::functionalization::impl::isFunctionalTensor(self));
+static at::Tensor lift_fresh_functionalize(const at::Tensor & self) {
+  // See Note [Exporting and compiling a graph with lift_fresh_copy]
+  if (at::functionalization::impl::isFunctionalTensor(self)) {
+    return self.view_as(self);
+  }
+
   at::AutoDispatchSkipFunctionalize guard;
   auto out = at::lift_fresh(self);
   return at::functionalization::impl::to_functional_tensor(out);
 }
 
-at::Tensor lift_fresh_functionalize_copy(const at::Tensor & self) {
-  TORCH_INTERNAL_ASSERT(!at::functionalization::impl::isFunctionalTensor(self));
+static at::Tensor lift_fresh_functionalize_copy(const at::Tensor & self) {
+  // Note [Exporting and compiling a graph with lift_fresh_copy]
+  // If out is already a functional tensor, don't wrap it twice.
+  // In theory this could be useful if we want to nest functionalization with itself,
+  // but that isn't really a use case today.
+  // Needed for https://github.com/pytorch/pytorch/issues/105327
+  if (at::functionalization::impl::isFunctionalTensor(self)) {
+    return self.clone();
+  }
+
   at::AutoDispatchSkipFunctionalize guard;
   auto out = at::lift_fresh_copy(self);
   return at::functionalization::impl::to_functional_tensor(out);
 }
 
-bool device_opted_into_functionalization(c10::Device self_device, c10::optional<c10::Device> tgt_device) {
+static bool device_opted_into_functionalization(c10::Device self_device, c10::optional<c10::Device> tgt_device) {
     // If the target device is empty, then the output tensor should be on the same device as the input
     auto real_tgt_device = tgt_device.has_value() ? tgt_device.value() : self_device;
     return real_tgt_device.type() == c10::DeviceType::XLA || real_tgt_device.type() == c10::DeviceType::Lazy;
@@ -205,7 +226,7 @@ bool device_opted_into_functionalization(c10::Device self_device, c10::optional<
 
 // note I only need this because the to.dtype/to.dtype_layout overload calls this, so we skip the op above.
 // We should probably get rid of this though.
-at::Tensor _to_copy_functionalize(
+static at::Tensor _to_copy_functionalize(
         const at::Tensor & self,
         c10::optional<at::ScalarType> dtype,
         c10::optional<at::Layout> layout,
@@ -258,7 +279,7 @@ at::Tensor _to_copy_functionalize(
 // The idea with _unsafe_view is that you're guaranteed that the input
 // is a temporary, and don't actually have to worry about propagating
 // mutations between the input and output.
-at::Tensor _unsafe_view_functionalize(const at::Tensor & self, at::SymIntArrayRef size) {
+static at::Tensor _unsafe_view_functionalize(const at::Tensor & self, at::SymIntArrayRef size) {
   if (!at::functionalization::impl::isFunctionalTensor(self)) {
     at::AutoDispatchSkipFunctionalize guard;
     return at::_unsafe_view_symint(self, size);
@@ -290,6 +311,28 @@ at::Tensor _unsafe_view_functionalize(const at::Tensor & self, at::SymIntArrayRe
   return out;
 }
 
+static at::Tensor& set__functionalize(at::Tensor& self, const at::Tensor& src) {
+  // error case
+  TORCH_CHECK(at::functionalization::impl::isFunctionalTensor(self) || !at::functionalization::impl::isFunctionalTensor(src),
+    "set__functionalize: Tried to mutate a non-functional tensor with a functional tensor, which is not allowed");
+
+  TORCH_CHECK(at::functionalization::impl::isFunctionalTensor(src),
+    "set__functionalize: We do not currently support x.set_(y) where y is not a FunctionalTensor. Please file an issue");
+
+  // nop case
+  if (!at::functionalization::impl::isFunctionalTensor(self) && !at::functionalization::impl::isFunctionalTensor(src)) {
+    at::AutoDispatchSkipFunctionalize guard;
+    return self.set_(src);
+  }
+
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(self));
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(src));
+  auto self_impl = at::functionalization::impl::unsafeGetFunctionalWrapper(self);
+  auto src_impl = at::functionalization::impl::unsafeGetFunctionalWrapper(src);
+  self_impl->set__impl(src_impl);
+  return self;
+}
+
 TORCH_LIBRARY_IMPL(_, Functionalize, m) {
   m.fallback(torch::CppFunction::makeFromBoxedFunction<&functionalizeFallback>());
 }
@@ -301,4 +344,7 @@ TORCH_LIBRARY_IMPL(aten, Functionalize, m) {
   m.impl("lift_fresh_copy", TORCH_FN(lift_fresh_functionalize_copy));
   m.impl("_to_copy", TORCH_FN(_to_copy_functionalize));
   m.impl("_unsafe_view", TORCH_FN(_unsafe_view_functionalize));
+  // The overloads of set_() that take in a storage should never
+  // appear with torch.compile, because dynamo graph breaks
+  m.impl("set_.source_Tensor", TORCH_FN(set__functionalize));
 }

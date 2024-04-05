@@ -5,7 +5,6 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/core/jit_type_base.h>
 #include <c10/util/irange.h>
-#include <c10/util/variant.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -13,10 +12,8 @@
 #include <torch/csrc/DynamicTypes.h>
 #include <torch/csrc/Generator.h>
 #include <torch/csrc/MemoryFormat.h>
+#include <torch/csrc/Stream.h>
 #include <torch/csrc/utils/tensor_memoryformats.h>
-
-#include <stdexcept>
-#include <utility>
 
 namespace py = pybind11;
 
@@ -28,8 +25,7 @@ PYBIND11_DECLARE_HOLDER_TYPE(T, c10::intrusive_ptr<T>, true);
 PYBIND11_DECLARE_HOLDER_TYPE(T, c10::SingletonOrSharedTypePtr<T>);
 PYBIND11_DECLARE_HOLDER_TYPE(T, c10::SingletonTypePtr<T>, true);
 
-namespace pybind11 {
-namespace detail {
+namespace pybind11::detail {
 
 // torch.Tensor <-> at::Tensor conversions (without unwrapping)
 template <>
@@ -193,6 +189,32 @@ struct type_caster<at::Device> {
 };
 
 template <>
+struct type_caster<c10::Stream> {
+ public:
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
+  PYBIND11_TYPE_CASTER(c10::Stream, _("torch.Stream"));
+
+  bool load(handle src, bool) {
+    PyObject* obj = src.ptr();
+    if (THPStream_Check(obj)) {
+      value = c10::Stream::unpack3(
+          ((THPStream*)obj)->stream_id,
+          ((THPStream*)obj)->device_index,
+          static_cast<c10::DeviceType>(((THPStream*)obj)->device_type));
+      return true;
+    }
+    return false;
+  }
+
+  static handle cast(
+      const c10::Stream& src,
+      return_value_policy /* policy */,
+      handle /* parent */) {
+    return handle(THPStream_Wrap(src));
+  }
+};
+
+template <>
 struct type_caster<c10::DispatchKey>
     : public type_caster_base<c10::DispatchKey> {
   using base = type_caster_base<c10::DispatchKey>;
@@ -224,7 +246,7 @@ struct TORCH_PYTHON_API type_caster<c10::Scalar> {
  public:
   PYBIND11_TYPE_CASTER(
       c10::Scalar,
-      _("Union[Number, torch.SymInt, torch.SymFloat]"));
+      _("Union[Number, torch.SymInt, torch.SymFloat, torch.SymBool]"));
   bool load(py::handle src, bool);
 
   static py::handle cast(
@@ -240,7 +262,7 @@ struct TORCH_PYTHON_API type_caster<c10::SymInt> {
   bool load(py::handle src, bool);
 
   static py::handle cast(
-      c10::SymInt si,
+      const c10::SymInt& si,
       return_value_policy /* policy */,
       handle /* parent */);
 };
@@ -252,7 +274,19 @@ struct TORCH_PYTHON_API type_caster<c10::SymFloat> {
   bool load(py::handle src, bool);
 
   static py::handle cast(
-      c10::SymFloat si,
+      const c10::SymFloat& si,
+      return_value_policy /* policy */,
+      handle /* parent */);
+};
+
+template <>
+struct TORCH_PYTHON_API type_caster<c10::SymBool> {
+ public:
+  PYBIND11_TYPE_CASTER(c10::SymBool, _("Union[bool, torch.SymBool]"));
+  bool load(py::handle src, bool);
+
+  static py::handle cast(
+      const c10::SymBool& si,
       return_value_policy /* policy */,
       handle /* parent */);
 };
@@ -286,19 +320,9 @@ struct type_caster<c10::complex<T>> {
   }
 };
 
-// Pybind11 bindings for our optional and variant types.
-// http://pybind11.readthedocs.io/en/stable/advanced/cast/stl.html#c-17-library-containers
-template <typename T>
-struct type_caster<c10::optional<T>> : optional_caster<c10::optional<T>> {};
+} // namespace pybind11::detail
 
-template <typename... Ts>
-struct C10_MPARK_VISIBILITY_HIDDEN type_caster<c10::variant<Ts...>>
-    : variant_caster<c10::variant<Ts...>> {};
-} // namespace detail
-} // namespace pybind11
-
-namespace torch {
-namespace impl {
+namespace torch::impl {
 
 // Use this function if you have a C++ object that is used from both C++
 // and Python contexts, and you need its GIL to be released when you
@@ -354,5 +378,4 @@ inline void destroy_without_gil(T* ptr) {
   }
 }
 
-} // namespace impl
-} // namespace torch
+} // namespace torch::impl

@@ -28,6 +28,7 @@ from torch._C import ScriptObject  # type: ignore[attr-defined]
 from ._compatibility import compatibility
 from .graph import _PyTreeCodeGen, _PyTreeInfo, Graph
 from .graph_module import GraphModule
+from ._lazy_graph_module import _make_graph_module
 from .node import Argument, base_types, map_aggregate
 from .proxy import ParameterProxy, Proxy, TracerBase, Scope, ScopeContextManager
 
@@ -97,6 +98,10 @@ class ProxyableClassMeta(type):
 
     def __call__(cls, *args, **kwargs):
         instance = cls.__new__(cls)  # type: ignore[call-overload]
+
+        if not is_fx_tracing():
+            cls.__init__(instance, *args, **kwargs)  # type: ignore[misc]
+            return instance
 
         found_proxies = []
 
@@ -201,6 +206,29 @@ class PHBase:
 PH = PHBase()
 
 
+@compatibility(is_backward_compatible=False)
+class PHWithMeta(PHBase):
+    """
+    Object representing an input placeholder to `concrete_args`
+    """
+    def __init__(self, ph_key: Optional[str] = None):
+        super().__init__()
+
+        # Provide a hey for user to identify placeholder node during analysis
+        self.ph_key = ph_key
+
+
+def _transfer_attrs(fr, to):
+    for attr_name in dir(fr):
+        attr_val = getattr(fr, attr_name)
+        if (
+            not callable(attr_val)
+            and not attr_name.startswith("__")
+            and not hasattr(to, attr_name)
+        ):
+            setattr(to, attr_name, attr_val)
+
+
 @compatibility(is_backward_compatible=True)
 class Tracer(TracerBase):
     # Reference: https://github.com/pytorch/pytorch/issues/54354
@@ -264,7 +292,7 @@ class Tracer(TracerBase):
             for name, value in chain(*[m.__dict__.items() for m in autowrap_modules])
             if not name.startswith("_") and callable(value)
         }
-        self._autowrap_function_ids.update(set([id(f) for f in autowrap_functions]))
+        self._autowrap_function_ids.update({id(f) for f in autowrap_functions})
 
         # Python modules to apply autowrap to at the start, in addition to
         # modules we see while tracing
@@ -462,7 +490,7 @@ class Tracer(TracerBase):
         with ScopeContextManager(self.scope, Scope(module_qualified_name, type(m))) as _scope:
             # module_stack is an ordered dict so writing then deleting the
             # entry is equivalent to push/pop on a list
-            self.module_stack[_scope.module_path] = _scope.module_type
+            self.module_stack[_scope.module_path] = (module_qualified_name, _scope.module_type)
             if not self.is_leaf_module(m, module_qualified_name):
                 ret_val = forward(*args, **kwargs)
             else:
@@ -564,62 +592,30 @@ class Tracer(TracerBase):
 
         sig = inspect.signature(fn_for_analysis)
 
-        def proxy_placeholder(name: str):
-            if concrete_args is not None and name in concrete_args:
-                cnt = 0
 
-                def replace_ph(x):
-                    nonlocal cnt
-                    cnt += 1
-                    param = sig.parameters[name]
-                    default = (
-                        ()
-                        if param.default is inspect.Parameter.empty
-                        else (param.default,)
-                    )
-                    out = self.create_proxy(
-                        "placeholder", f"{name}_{str(cnt)}", default, {}
-                    )
-                    if x == PH:
-                        return out
-                    # Union[int, bool] == bool in Python <= 3.6
-                    if (
-                        type(x) == bool
-                        or type(x) in base_types
-                        and type(x) != torch.Tensor
-                    ):
-                        torch._assert(
-                            out == x,
-                            f"{name} has been specialized to have value {x} but got another value",
-                        )
-                    elif type(x) == type(None):
-                        args = (
-                            out,
-                            f"{name} has been specialized to have value None but got another value",
-                        )
-                        self.create_proxy("call_function", _assert_is_none, args, {})
-                    else:
-                        warnings.warn(
-                            f"Was not able to add assertion to guarantee correct input {name} to "
-                            f"specialized function. It is up to the user to make sure that your inputs match the "
-                            f"inputs you specialized the function with."
-                        )
-
-                    return x
-
-                return pytree.tree_map(replace_ph, concrete_args[name])
-            if name[0] == "*":
-                default = ()
-            else:
-                param = sig.parameters[name]
-                default = () if param.default is inspect.Parameter.empty else (param.default,)  # type: ignore[assignment]
-            return self.create_proxy(
-                "placeholder",
-                name,
-                default,
-                {},
-                type_expr=fn_for_analysis.__annotations__.get(name, None)
-            )
+        # This covers the very specific case where we are passing in flat
+        # concrete_args as a tuple, but our traced fn takes (*args, **kwargs).
+        # In this case, just take the concrete_args and pass them through.
+        name_idx = 0
+        if isinstance(concrete_args, tuple) and \
+                len(concrete_args) > 0 and \
+                (co.co_flags & HAS_VARSTUFF) and \
+                total_args == 1:
+            for concrete_arg in concrete_args:
+                out = self.create_proxy("placeholder", f"input_{name_idx}", (), {})
+                if isinstance(concrete_arg, PHBase):
+                    if concrete_arg != PH:
+                        # Transfer attrs in the case where you're using a placeholder other
+                        # than the singleton PH (PH has no attributes to transfer).
+                        # Proxies were created out of the placeholders.
+                        # Transfer any metadata (put on the placeholders in the form of
+                        # attributes set by the user) from the placeholder to the
+                        # underlying nodes (the proxy is unwrapped by the user, but
+                        # the metadata should hold).
+                        _transfer_attrs(fr=concrete_arg, to=out.node)
+                args.append(out)
+                name_idx += 1
+            return root_fn, args
 
         arg_names = [next(names_iter) for idx in range(skip_arg_idx, total_args)]
         if isinstance(concrete_args, tuple):
@@ -627,7 +623,11 @@ class Tracer(TracerBase):
                 raise RuntimeError(
                     f"Tracing expected {len(arg_names)} arguments but got {len(concrete_args)} concrete arguments"
                 )
-            concrete_args = {name: val for name, val in zip(arg_names, concrete_args)}
+            concrete_args = dict(zip(arg_names, concrete_args))
+
+        def proxy_placeholder(name):
+            return self._proxy_placeholder(name, concrete_args, sig, fn_for_analysis)
+
         args.extend(proxy_placeholder(names) for names in arg_names)
 
         if co.co_kwonlyargcount > 0 or co.co_flags & HAS_VARSTUFF:
@@ -639,7 +639,7 @@ class Tracer(TracerBase):
             root_fn = _patch_function(root_fn, len(args))
 
         flat_args, in_spec = pytree.tree_flatten(tuple(args))
-        if any(not isinstance(i, pytree.LeafSpec) for i in in_spec.children_specs):
+        if not all(child.is_leaf() for child in in_spec.children_specs):
             # In the case that we have pytree-flattened inputs in
             # `concrete_args`, generate a flattening wrapper around the
             # original root function and return that.
@@ -694,6 +694,14 @@ class Tracer(TracerBase):
         _is_fx_tracing_flag = True
         try:
             if isinstance(root, torch.nn.Module):
+
+                # do real recompilation for _LazyGraphModule before retracing since the trace
+                # method can not trace the _lazy_forward method. Got error:
+                #   https://gist.github.com/shunting314/75549c2e82ae07ac1139c94a3583d259
+                # without this.
+                from torch.fx._lazy_graph_module import _LazyGraphModule
+                _LazyGraphModule.force_recompile(root)
+
                 self.root = root
 
                 assert hasattr(
@@ -707,8 +715,15 @@ class Tracer(TracerBase):
                 self.root = torch.nn.Module()
                 fn = root
 
-            tracer_cls: Optional[Type["Tracer"]] = getattr(self, "__class__", None)
+            tracer_cls: Optional[Type[Tracer]] = getattr(self, "__class__", None)
             self.graph = Graph(tracer_cls=tracer_cls)
+            if hasattr(fn, '__code__'):
+                code = fn.__code__
+                self.graph._co_fields = {
+                    'co_name': code.co_name,
+                    'co_filename': code.co_filename,
+                    'co_firstlineno': code.co_firstlineno,
+                }
 
             # When we encounter a Tensor value that's not a parameter, we look if it
             # is some other attribute on the model. Construct a dict mapping Tensor
@@ -799,10 +814,79 @@ class Tracer(TracerBase):
 
         return new_tracer
 
+    def _proxy_placeholder(self, name, concrete_args, sig, fn_for_analysis):
+        if concrete_args is not None and name in concrete_args:
+            cnt = 0
 
-# List of pairs of (global dict, function name) functions
-# to patch for the purposes of the wrap() API.
-_wrapped_fns_to_patch: List[Tuple[dict, str]] = []
+            def replace_ph(x):
+                nonlocal cnt
+                cnt += 1
+                param = sig.parameters[name]
+                default = (
+                    ()
+                    if param.default is inspect.Parameter.empty
+                    else (param.default,)
+                )
+                out = self.create_proxy(
+                    "placeholder", f"{name}_{str(cnt)}", default, {}
+                )
+                if isinstance(x, PHBase):
+                    if x != PH:
+                        # Transfer attrs in the case where you're using a placeholder other
+                        # than the singleton PH (PH has no attributes to transfer).
+                        # Proxies were created out of the placeholders.
+                        # Transfer any metadata (put on the placeholders in the form of
+                        # attributes set by the user) from the placeholder to the
+                        # underlying nodes (the proxy is unwrapped by the user, but
+                        # the metadata should hold).
+                        _transfer_attrs(fr=x, to=out.node)
+
+                    return out
+                # Union[int, bool] == bool in Python <= 3.6
+                if (
+                    type(x) == bool
+                    or type(x) in base_types
+                    and type(x) != torch.Tensor
+                ):
+                    torch._assert(
+                        out == x,
+                        f"{name} has been specialized to have value {x} but got another value",
+                    )
+                elif x is None:
+                    args = (
+                        out,
+                        f"{name} has been specialized to have value None but got another value",
+                    )
+                    self.create_proxy("call_function", _assert_is_none, args, {})
+                else:
+                    warnings.warn(
+                        f"Was not able to add assertion to guarantee correct input {name} to "
+                        f"specialized function. It is up to the user to make sure that your inputs match the "
+                        f"inputs you specialized the function with."
+                    )
+
+                return x
+
+            return pytree.tree_map(replace_ph, concrete_args[name])
+        if name[0] == "*":
+            default = ()
+        else:
+            param = sig.parameters[name]
+            default = () if param.default is inspect.Parameter.empty else (param.default,)  # type: ignore[assignment]
+        return self.create_proxy(
+            "placeholder",
+            name,
+            default,
+            {},
+            type_expr=fn_for_analysis.__annotations__.get(name, None)
+        )
+
+
+# Dictionary of (id(globals dict), function name) => globals_dict to patch for
+# the purposes of the wrap() API.
+# We key by the globals dict id and function name to ensure we're wrapping a given
+# function only once.
+_wrapped_fns_to_patch: Dict[Tuple[int, str], dict] = {}
 
 # List of methods on classes to wrap (class type, function name)
 # this currently only works for Tensor.* methods that aren't traced properly
@@ -899,7 +983,7 @@ class _PatchedFnSetAttr(_PatchedFn):
 
 class _Patcher:
     def __init__(self):
-        super(_Patcher, self).__init__()
+        super().__init__()
         self.patches_made: List[_PatchedFn] = []
         self.visited: Set[int] = set()
 
@@ -963,7 +1047,7 @@ def _patch_wrapped_functions(patcher: _Patcher):
     Go through ``_wrapped_fn_patch_table`` and, for each frame object, wrap
     the listed global functions in the `_create_wrapped_func` wrapper.
     """
-    for frame_dict, name in _wrapped_fns_to_patch:
+    for (_, name), frame_dict in _wrapped_fns_to_patch.copy().items():
         if name not in frame_dict and hasattr(builtins, name):
             orig_fn = getattr(builtins, name)
         else:
@@ -1049,7 +1133,7 @@ def wrap(fn_or_name: Union[str, Callable]):
 
     # consider implementing Callable version of this via _autowrap_function_ids / _autowrap_search
     # semantics would be slightly different, but would add support `from x import wrapped_function`
-    _wrapped_fns_to_patch.append((f.f_globals, fn_name))
+    _wrapped_fns_to_patch[(id(f.f_globals), fn_name)] = f.f_globals
     return fn_or_name
 
 
@@ -1110,7 +1194,7 @@ def symbolic_trace(
     name = (
         root.__class__.__name__ if isinstance(root, torch.nn.Module) else root.__name__
     )
-    return GraphModule(tracer.root, graph, name)
+    return _make_graph_module(tracer.root, graph, name)
 
 
 @wrap

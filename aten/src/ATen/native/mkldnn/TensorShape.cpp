@@ -1,7 +1,6 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/Config.h>
 #include <ATen/InferSize.h>
-#include <ATen/WrapDimUtils.h>
 #include <ATen/core/Tensor.h>
 #include <c10/core/SymIntArrayRef.h>
 
@@ -106,7 +105,7 @@ namespace at {
 namespace native {
 
 
-Tensor mkldnn_view_symint(const Tensor& self, c10::SymIntArrayRef size) {
+static Tensor mkldnn_view_symint(const Tensor& self, c10::SymIntArrayRef size) {
   return mkldnn_view(self, C10_AS_INTARRAYREF_SLOW(size));
 }
 

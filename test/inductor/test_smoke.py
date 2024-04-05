@@ -1,15 +1,18 @@
 # Owner(s): ["module: inductor"]
 import logging
+import unittest
 
 import torch
-import torch._dynamo as torchdynamo
-import torch._inductor.config as torchinductor_config
-from torch.testing._internal.common_utils import IS_LINUX, TestCase
+import torch._logging
+
+from torch._inductor.test_case import TestCase
+from torch.testing._internal.common_utils import IS_LINUX
+from torch.testing._internal.inductor_utils import HAS_CUDA
 
 
 class MLP(torch.nn.Module):
     def __init__(self):
-        super(MLP, self).__init__()
+        super().__init__()
         self.l1 = torch.nn.Linear(1, 6)
         self.l2 = torch.nn.Linear(6, 1)
 
@@ -24,18 +27,20 @@ def _test_f(x):
 
 
 class SmokeTest(TestCase):
+    @unittest.skipIf(not HAS_CUDA, "Triton is not available")
     def test_mlp(self):
-        torchdynamo.config.log_level = logging.INFO
-        torchdynamo.config.verbose = True
-        torchinductor_config.debug = True
+        torch._logging.set_logs(
+            dynamo=logging.DEBUG, inductor=logging.DEBUG, aot=logging.DEBUG
+        )
 
         mlp = torch.compile(MLP().cuda())
         for _ in range(3):
             mlp(torch.randn(1, device="cuda"))
 
-        torchdynamo.config.verbose = False
-        torchinductor_config.debug = False
+        # set back to defaults
+        torch._logging.set_logs()
 
+    @unittest.skipIf(not HAS_CUDA, "Triton is not available")
     def test_compile_decorator(self):
         @torch.compile
         def foo(x):
@@ -55,7 +60,7 @@ class SmokeTest(TestCase):
 
 
 if __name__ == "__main__":
-    from torch._dynamo.test_case import run_tests
+    from torch._inductor.test_case import run_tests
 
     if IS_LINUX and torch.cuda.is_available():
         if torch.cuda.get_device_properties(0).major > 5:

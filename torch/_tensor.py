@@ -76,16 +76,19 @@ def _rebuild_from_type_v2(func, new_type, args, state):
 # to define a ForkingPickler serialization mode for the class.
 #
 # NB: If you add a new method to Tensor, you must update
-# torch/__init__.py.in to add a type annotation for your method;
+# torch/_C/__init__.pyi.in to add a type annotation for your method;
 # otherwise, it will not show up in autocomplete.
-class Tensor(torch._C._TensorBase):
+class Tensor(torch._C.TensorBase):
     def __deepcopy__(self, memo):
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.__deepcopy__, (self,), self, memo)
         if not self.is_leaf:
             raise RuntimeError(
                 "Only Tensors created explicitly by the user "
-                "(graph leaves) support the deepcopy protocol at the moment"
+                "(graph leaves) support the deepcopy protocol at the moment.  "
+                "If you were attempting to deepcopy a module, this may be because "
+                "of a torch.nn.utils.weight_norm usage, "
+                "see https://github.com/pytorch/pytorch/pull/103001"
             )
         if id(self) in memo:
             return memo[id(self)]
@@ -98,10 +101,10 @@ class Tensor(torch._C._TensorBase):
             if (
                 self.is_sparse
                 or self.device.type
-                in ["lazy", "xla", "mps", "ort", "meta", "hpu", "ipu"]
+                in ["lazy", "xla", "mtia", "mps", "ort", "meta", "ipu"]
                 or (
                     not torch._C._has_storage(self)
-                    and self.device.type == "privateuseone"
+                    and self.device.type == torch._C._get_privateuse1_backend_name()
                 )
                 or (type(self) is not Tensor and self.data_ptr() == 0)
             ):
@@ -188,7 +191,7 @@ class Tensor(torch._C._TensorBase):
             if self.grad is not None:
                 new_tensor.grad = self.grad.__deepcopy__(memo)
 
-            if not type(self) is Tensor:
+            if type(self) is not Tensor:
                 if type(new_tensor) is not type(self):
                     raise RuntimeError(
                         "Type of deepcopy result does not match the type of the source tensor. "
@@ -246,7 +249,7 @@ class Tensor(torch._C._TensorBase):
         # See Note [Don't serialize hooks]
         torch.utils.hooks.warn_if_has_hooks(self)
         backward_hooks: Dict[Any, Any] = OrderedDict()
-        # Note: Numpy array is chosen to be the rebuild component for XLA, ORT Tensors.
+        # Note: Numpy array is chosen to be the rebuild component for XLA, MTIA, ORT Tensors.
         # We considered a few options:
         # 1. CPU tensor can't be used here.
         #    Otherwise in torch.load CPU storage is reconstructed with randomly
@@ -256,8 +259,9 @@ class Tensor(torch._C._TensorBase):
         # 2. Python list is not a good fit due to performance reason.
         #    `tolist()` converts every single element in the tensor into python objects
         #    and serialize them one by one.
-        if self.device.type in ["xla", "ort", "hpu"] or (
-            not torch._C._has_storage(self) and self.device.type == "privateuseone"
+        if self.device.type in ["xla", "mtia", "ort"] or (
+            not torch._C._has_storage(self)
+            and self.device.type == torch._C._get_privateuse1_backend_name()
         ):
             # Convert BFloat16 tesors to Float32 before conversion to numpy, as numpy doesn't
             # support BFloat16. The rebuild tensor from numpy takes in the original self.dtype,
@@ -329,11 +333,11 @@ class Tensor(torch._C._TensorBase):
             if self.layout == torch.sparse_coo:
                 args_sparse = (
                     self.layout,
-                    (self._indices(), self._values(), self.size()),
+                    (self._indices(), self._values(), self.size(), self.is_coalesced()),
                 )
             else:
                 raise NotImplementedError(
-                    "sparse tensor __reduce_ex__ for layout `%s`" % (self.layout)
+                    f"sparse tensor __reduce_ex__ for layout `{self.layout}`"
                 )
             return (torch._utils._rebuild_sparse_tensor, args_sparse)
         elif self.layout in {
@@ -362,10 +366,30 @@ class Tensor(torch._C._TensorBase):
                 ),
             )
             return (torch._utils._rebuild_sparse_tensor, args_sparse_compressed)
+        elif self.is_nested:
+            args_nested = (
+                # NB: values() currently returns the storage as a buffer in an unsafe way.
+                # Ideally, we'd use a private API for this instead. TODO: Switch to this if
+                # we ever get around to adding it.
+                self.values(),
+                self._nested_tensor_size(),
+                self._nested_tensor_strides(),
+                self._nested_tensor_storage_offsets(),
+            )
+            return (torch._utils._rebuild_nested_tensor, args_nested)
         elif (
-            self.data_ptr() == 0
-            and type(self) is not torch.Tensor
+            type(self) is not torch.Tensor
             and type(self).__torch_dispatch__ is not torch.Tensor.__torch_dispatch__
+            and (
+                isinstance(
+                    self,
+                    (
+                        torch._subclasses.fake_tensor.FakeTensor,
+                        torch._subclasses.functional_tensor.FunctionalTensor,
+                    ),
+                )
+                or self.data_ptr() == 0
+            )
         ):
             arg_wrapper_subclass = (
                 type(self),
@@ -379,14 +403,32 @@ class Tensor(torch._C._TensorBase):
             )
             return (torch._utils._rebuild_wrapper_subclass, arg_wrapper_subclass)
         else:
-            # TODO: Once we decide to break serialization FC, no longer
-            # need to wrap with TypedStorage
-            args = (
-                torch.storage.TypedStorage(
+            v3_dtypes = [
+                torch.float8_e5m2,
+                torch.float8_e4m3fn,
+                torch.float8_e5m2fnuz,
+                torch.float8_e4m3fnuz,
+                torch.bits8,
+                torch.bits16,
+                torch.bits1x8,
+                torch.bits2x4,
+                torch.bits4x2,
+                torch.complex32,
+            ]
+            if self.dtype in v3_dtypes:
+                rebuild_func = torch._utils._rebuild_tensor_v3
+                storage = self.untyped_storage()
+            else:
+                # TODO: Once we decide to break serialization FC, no longer
+                # need to wrap with TypedStorage
+                rebuild_func = torch._utils._rebuild_tensor_v2  # type: ignore[assignment]
+                storage = torch.storage.TypedStorage(
                     wrap_storage=self._typed_storage()._untyped_storage,
                     dtype=self.dtype,
                     _internal=True,
-                ),
+                )  # type: ignore[assignment]
+            args = (
+                storage,
                 self.storage_offset(),
                 tuple(self.size()),
                 self.stride(),
@@ -394,10 +436,14 @@ class Tensor(torch._C._TensorBase):
                 backward_hooks,
             )  # previously was self._backward_hooks
 
+            if isinstance(storage, torch.storage.UntypedStorage):
+                args = args + (self.dtype,)  # type: ignore[assignment]
+
             metadata = torch._utils.get_tensor_metadata(self)
             if metadata:
                 args = args + (metadata,)  # type: ignore[assignment]
-            return (torch._utils._rebuild_tensor_v2, args)
+
+            return (rebuild_func, args)
 
     def __setstate__(self, state):
         if has_torch_function_unary(self):
@@ -429,7 +475,7 @@ class Tensor(torch._C._TensorBase):
     def backward(
         self, gradient=None, retain_graph=None, create_graph=False, inputs=None
     ):
-        r"""Computes the gradient of current tensor w.r.t. graph leaves.
+        r"""Computes the gradient of current tensor wrt graph leaves.
 
         The graph is differentiated using the chain rule. If the tensor is
         non-scalar (i.e. its data has more than one element) and requires
@@ -526,7 +572,7 @@ class Tensor(torch._C._TensorBase):
             return handle_torch_function(Tensor.register_hook, (self,), self, hook)
         if not self.requires_grad:
             raise RuntimeError(
-                "cannot register a hook on a tensor that " "doesn't require gradient"
+                "cannot register a hook on a tensor that doesn't require gradient"
             )
         if self._backward_hooks is None:
             self._backward_hooks = OrderedDict()
@@ -534,6 +580,62 @@ class Tensor(torch._C._TensorBase):
                 self.grad_fn._register_hook_dict(self)
         handle = hooks.RemovableHandle(self._backward_hooks)
         self._backward_hooks[handle.id] = hook
+        return handle
+
+    def register_post_accumulate_grad_hook(self, hook):
+        r"""Registers a backward hook that runs after grad accumulation.
+
+        The hook will be called after all gradients for a tensor have been accumulated,
+        meaning that the .grad field has been updated on that tensor. The post
+        accumulate grad hook is ONLY applicable for leaf tensors (tensors without a
+        .grad_fn field). Registering this hook on a non-leaf tensor will error!
+
+        The hook should have the following signature::
+
+            hook(param: Tensor) -> None
+
+        Note that, unlike other autograd hooks, this hook operates on the tensor
+        that requires grad and not the grad itself. The hook can in-place modify
+        and access its Tensor argument, including its .grad field.
+
+        This function returns a handle with a method ``handle.remove()``
+        that removes the hook from the module.
+
+        .. note::
+            See :ref:`backward-hooks-execution` for more information on how when this hook
+            is executed, and how its execution is ordered relative to other hooks. Since
+            this hook runs during the backward pass, it will run in no_grad mode (unless
+            create_graph is True). You can use torch.enable_grad() to re-enable autograd
+            within the hook if you need it.
+
+        Example::
+
+            >>> v = torch.tensor([0., 0., 0.], requires_grad=True)
+            >>> lr = 0.01
+            >>> # simulate a simple SGD update
+            >>> h = v.register_post_accumulate_grad_hook(lambda p: p.add_(p.grad, alpha=-lr))
+            >>> v.backward(torch.tensor([1., 2., 3.]))
+            >>> v
+            tensor([-0.0100, -0.0200, -0.0300], requires_grad=True)
+
+            >>> h.remove()  # removes the hook
+        """
+        if has_torch_function_unary(self):
+            return handle_torch_function(
+                Tensor.register_post_accumulate_grad_hook, (self,), self, hook
+            )
+        if not self.requires_grad:
+            raise RuntimeError(
+                "cannot register a hook on a tensor that doesn't require gradient"
+            )
+        if self.grad_fn is not None:
+            raise RuntimeError(
+                "post accumulate grad hooks cannot be registered on non-leaf tensors"
+            )
+        if self._post_accumulate_grad_hooks is None:
+            self._post_accumulate_grad_hooks: Dict[Any, Any] = OrderedDict()
+        handle = hooks.RemovableHandle(self._post_accumulate_grad_hooks)
+        self._post_accumulate_grad_hooks[handle.id] = hook
         return handle
 
     def reinforce(self, reward):
@@ -544,7 +646,7 @@ class Tensor(torch._C._TensorBase):
             trim(
                 r"""reinforce() was removed.
             Use torch.distributions instead.
-            See https://pytorch.org/docs/master/distributions.html
+            See https://pytorch.org/docs/main/distributions.html
 
             Instead of:
 
@@ -568,7 +670,7 @@ class Tensor(torch._C._TensorBase):
         )
 
     detach = _C._add_docstr(
-        _C._TensorBase.detach,
+        _C.TensorBase.detach,
         r"""
     Returns a new Tensor, detached from the current graph.
 
@@ -582,19 +684,11 @@ class Tensor(torch._C._TensorBase):
       Returned Tensor shares the same storage with the original one.
       In-place modifications on either of them will be seen, and may trigger
       errors in correctness checks.
-      IMPORTANT NOTE: Previously, in-place size / stride / storage changes
-      (such as `resize_` / `resize_as_` / `set_` / `transpose_`) to the returned tensor
-      also update the original tensor. Now, these in-place changes will not update the
-      original tensor anymore, and will instead trigger an error.
-      For sparse tensors:
-      In-place indices / values changes (such as `zero_` / `copy_` / `add_`) to the
-      returned tensor will not update the original tensor anymore, and will instead
-      trigger an error.
     """,
     )
 
     detach_ = _C._add_docstr(
-        _C._TensorBase.detach_,
+        _C.TensorBase.detach_,
         r"""
     Detaches the Tensor from the graph that created it, making it a leaf.
     Views cannot be detached in-place.
@@ -618,11 +712,43 @@ class Tensor(torch._C._TensorBase):
 
         This is a no-op if the underlying storage is already in shared memory
         and for CUDA tensors. Tensors in shared memory cannot be resized.
+
+        See :meth:`torch.UntypedStorage.share_memory_` for more details.
         """
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.share_memory_, (self,), self)
         self._typed_storage()._share_memory_()
         return self
+
+    def module_load(self, other, assign=False):
+        r"""Defines how to transform ``other`` when loading it into ``self`` in :meth:`~nn.Module.load_state_dict`.
+
+        Used when :func:`~torch.__future__.get_swap_module_params_on_conversion` is ``True``.
+
+        It is expected that ``self`` is a parameter or buffer in an ``nn.Module`` and ``other`` is the
+        value in the state dictionary with the corresponding key, this method defines
+        how ``other`` is remapped before being swapped with ``self`` via
+        :func:`~torch.utils.swap_tensors`` in ``module.load_state_dict()``.
+
+        .. note::
+            This method should always return a new object that is not ``self`` or ``other``.
+            For example, the default implementation returns ``self.copy_(other).detach()``
+            if ``assign`` is ``False`` or ``other.detach()`` if ``assign`` is ``True``.
+
+        Args:
+            other (Tensor): value in state dict with key corresponding to ``self``
+            assign (bool): the assign argument passed to :meth:`nn.Module.load_state_dict`
+
+        """
+        if has_torch_function_variadic(self, other):
+            return handle_torch_function(
+                Tensor.module_load, (self, other), self, other, assign=assign
+            )
+
+        if assign:
+            return other.detach()
+        else:
+            return self.copy_(other).detach()
 
     def __reversed__(self):
         r"""Reverses the tensor along dimension 0."""
@@ -853,13 +979,13 @@ class Tensor(torch._C._TensorBase):
         return self.reciprocal() * other
 
     __rtruediv__ = __rdiv__
-    __itruediv__ = _C._TensorBase.__idiv__
+    __itruediv__ = _C.TensorBase.__idiv__
 
     __pow__ = _handle_torch_function_and_wrap_type_error_to_not_implemented(
-        _C._TensorBase.pow
+        _C.TensorBase.pow
     )
     __ipow__ = _handle_torch_function_and_wrap_type_error_to_not_implemented(
-        _C._TensorBase.pow_
+        _C.TensorBase.pow_
     )
 
     @_handle_torch_function_and_wrap_type_error_to_not_implemented
@@ -875,8 +1001,7 @@ class Tensor(torch._C._TensorBase):
 
     @_handle_torch_function_and_wrap_type_error_to_not_implemented
     def __rpow__(self, other):
-        dtype = torch.result_type(other, self)
-        return torch.tensor(other, dtype=dtype, device=self.device) ** self
+        return torch.pow(other, self)
 
     @_handle_torch_function_and_wrap_type_error_to_not_implemented
     def __floordiv__(self, other):
@@ -898,9 +1023,9 @@ class Tensor(torch._C._TensorBase):
     def __rmatmul__(self, other):
         return torch.matmul(other, self)
 
-    __pos__ = _C._TensorBase.positive
-    __neg__ = _C._TensorBase.neg
-    __abs__ = _C._TensorBase.abs
+    __pos__ = _C.TensorBase.positive
+    __neg__ = _C.TensorBase.neg
+    __abs__ = _C.TensorBase.abs
 
     def __len__(self):
         if has_torch_function_unary(self):
@@ -993,13 +1118,14 @@ class Tensor(torch._C._TensorBase):
         """
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.__contains__, (self,), self, element)
-        if isinstance(element, (torch.Tensor, Number)):
+        if isinstance(
+            element, (torch.Tensor, Number, torch.SymInt, torch.SymFloat, torch.SymBool)
+        ):
             # type hint doesn't understand the __contains__ result array
             return (element == self).any().item()  # type: ignore[union-attr]
 
         raise RuntimeError(
-            "Tensor.__contains__ only supports Tensor or scalar, but you passed in a %s."
-            % type(element)
+            f"Tensor.__contains__ only supports Tensor or scalar, but you passed in a {type(element)}."
         )
 
     @property
@@ -1120,7 +1246,7 @@ class Tensor(torch._C._TensorBase):
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.refine_names, (self,), self, *names)
         names = resolve_ellipsis(names, self.names, "refine_names")
-        return super(Tensor, self).refine_names(names)
+        return super().refine_names(names)
 
     def align_to(self, *names):
         r"""Permutes the dimensions of the :attr:`self` tensor to match the order
@@ -1162,8 +1288,8 @@ class Tensor(torch._C._TensorBase):
             return handle_torch_function(Tensor.align_to, (self,), self, *names)
         ellipsis_idx = single_ellipsis_index(names, "align_to")
         if ellipsis_idx is None:
-            return super(Tensor, self).align_to(names)
-        return super(Tensor, self).align_to(
+            return super().align_to(names)
+        return super().align_to(
             [name for name in names if not is_ellipsis(name)], ellipsis_idx
         )
 
@@ -1185,9 +1311,9 @@ class Tensor(torch._C._TensorBase):
             isinstance(sizes, (tuple, list)) and isinstance(sizes[0], (tuple, list))
         ):
             names, sizes = unzip_namedshape(sizes)
-            return super(Tensor, self).unflatten(dim, sizes, names)
+            return super().unflatten(dim, sizes, names)
         else:
-            return super(Tensor, self).unflatten(dim, sizes)
+            return super().unflatten(dim, sizes)
 
     def rename_(self, *names, **rename_map):
         """In-place version of :meth:`~Tensor.rename`."""
@@ -1259,6 +1385,36 @@ class Tensor(torch._C._TensorBase):
         """
         return self.to_sparse()
 
+    def dim_order(self):
+        """
+
+        dim_order() -> tuple
+
+        Returns a tuple of int describing the dim order or physical layout of :attr:`self`.
+
+        Args:
+            None
+
+        Dim order represents how dimensions are laid out in memory,
+        starting from the outermost to the innermost dimension.
+
+        Example::
+            >>> torch.empty((2, 3, 5, 7)).dim_order()
+            (0, 1, 2, 3)
+            >>> torch.empty((2, 3, 5, 7), memory_format=torch.channels_last).dim_order()
+            (0, 2, 3, 1)
+
+        .. warning::
+            The dim_order tensor API is experimental and subject to change.
+
+        """
+        if has_torch_function_unary(self):
+            return handle_torch_function(Tensor.dim_order, (self,), self)
+
+        import torch._prims_common as utils
+
+        return tuple(utils.compute_elementwise_output_logical_to_physical_perm(self))
+
     def _update_names(self, names, inplace):
         if has_torch_function_unary(self):
             return handle_torch_function(
@@ -1267,9 +1423,9 @@ class Tensor(torch._C._TensorBase):
 
         # See Note [rename_ / rename API]
         if inplace:
-            return super(Tensor, self).rename_(names)
+            return super().rename_(names)
         else:
-            return super(Tensor, self).rename(names)
+            return super().rename(names)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -1316,6 +1472,8 @@ class Tensor(torch._C._TensorBase):
             this stream before the capsule is created, and since the capsule
             shares its storage with the tensor this make it safe to access from
             both streams.  If None or -1 is passed then no synchronization is performed.
+            If 1 (on CUDA) or 0 (on ROCM) then the default stream is used for
+            synchronization.
         """
         if has_torch_function_unary(self):
             return handle_torch_function(Tensor.__dlpack__, (self,), self, stream)
@@ -1340,7 +1498,15 @@ class Tensor(torch._C._TensorBase):
             raise TypeError("stream must be ``int`` or ``none``")
         elif stream is not None and stream != -1:
             if self.device.type == "cuda":
-                stream = torch.cuda.ExternalStream(stream)
+                # NB: This logic handles the special case values for default
+                # streams and must be kept in sync with from_dlpack in
+                # torch/utils/dlpack.py
+                if stream == 1 and torch.version.hip is None:
+                    stream = torch.cuda.default_stream()
+                elif stream == 0 and torch.version.hip is not None:
+                    stream = torch.cuda.default_stream()
+                else:
+                    stream = torch.cuda.ExternalStream(stream)
                 # Only synchronize on different streams
                 sync_stream = torch.cuda.current_stream()
                 if stream != sync_stream:
@@ -1363,10 +1529,10 @@ class Tensor(torch._C._TensorBase):
             device_type = DLDeviceType.kDLGPU
         elif torch_device_type == "cpu":
             device_type = DLDeviceType.kDLCPU
+        elif self.device.type == "xpu":
+            device_type = DLDeviceType.kDLOneAPI
         else:
-            raise ValueError(
-                "Unknown device type {} for Dlpack".format(torch_device_type)
-            )
+            raise ValueError(f"Unknown device type {torch_device_type} for Dlpack")
         return (device_type, idx)
 
     __module__ = "torch"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <c10/util/Optional.h>
+#include <c10/util/string_view.h>
 #include <ATen/Config.h>
 #include <ATen/native/DispatchStub.h>
 
@@ -15,7 +16,7 @@ enum class TransposeType;
 
 }
 
-namespace at { namespace native {
+namespace at::native {
 
 enum class LapackLstsqDriverType : int64_t { Gels, Gelsd, Gelsy, Gelss};
 
@@ -317,4 +318,4 @@ using ldl_solve_fn = void (*)(
     bool /*upper*/,
     bool /*hermitian*/);
 DECLARE_DISPATCH(ldl_solve_fn, ldl_solve_stub);
-}} // namespace at::native
+} // namespace at::native

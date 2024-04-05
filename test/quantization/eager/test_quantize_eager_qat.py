@@ -120,7 +120,7 @@ class _ReferenceConvBnNd(torch.nn.Conv2d, torch.nn.modules.conv._ConvNd):
             init.uniform_(self.bias, -bound, bound)
 
     def reset_parameters(self):
-        super(_ReferenceConvBnNd, self).reset_parameters()
+        super().reset_parameters()
         # A hack to avoid resetting on undefined parameters
         if hasattr(self, 'gamma'):
             self.reset_bn_parameters()
@@ -191,7 +191,7 @@ class _ReferenceConvBnNd(torch.nn.Conv2d, torch.nn.modules.conv._ConvNd):
 
     def extra_repr(self):
         # TODO(jerryzh): extend
-        return super(_ReferenceConvBnNd, self).extra_repr()
+        return super().extra_repr()
 
     def forward(self, input):
         return self.activation_post_process(self._forward(input))
@@ -839,7 +839,7 @@ class TestQuantizeEagerQATNumerics(QuantizationTestCase):
             return reduce(lambda f, g: lambda x: f(g(x)), functions[::-1], lambda x: x)
 
         if not use_relu:
-            def relu_op(x):
+            def relu_op(x):  # noqa: F811
                 return x
 
         if freeze_bn:

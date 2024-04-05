@@ -7,8 +7,9 @@
 #include <ATen/functorch/TensorWrapper.h>
 #include <ATen/functorch/DynamicLayer.h>
 #include <ATen/functorch/BatchedTensorImpl.h>
+#include <ATen/functorch/PlumbingHelper.h>
 
-namespace at { namespace functorch {
+namespace at::functorch {
 
 void vmap_check_escaped(const optional<DynamicLayer> &layer, const char* what) {
   TORCH_CHECK(
@@ -71,7 +72,7 @@ bool isBatchedAtLevel(ITensorListRef tensors, int64_t level) {
   return false;
 }
 
-bool isBatchedAtLevel(const c10::List<c10::optional<Tensor>> maybe_tensors, int64_t level) {
+bool isBatchedAtLevel(const c10::List<c10::optional<Tensor>>& maybe_tensors, int64_t level) {
   for (const auto idx : c10::irange(0, maybe_tensors.size())) {
     const auto& maybe_tensor = maybe_tensors.get(idx);
     if (isBatchedAtLevel(maybe_tensor, level)) {
@@ -91,4 +92,4 @@ bool areAnyBatchedAtLevel(ArrayRef<optional<Tensor>> maybe_tensors, int64_t leve
 }
 
 
-}}
+} // namespace at::functorch

@@ -4,7 +4,6 @@ from typing import Any, List
 
 import torch
 
-from . import config
 from .utils import print_once
 
 
@@ -51,7 +50,7 @@ class ProfileResult:
         self.total: ProfileMetrics = total or ProfileMetrics()
         self.unique_graphs: int = unique_graphs
 
-    def __iadd__(self, other: ProfileMetrics):
+    def __iadd__(self, other: "ProfileResult"):
         self.captured += other.captured
         self.total += other.total
         self.unique_graphs += other.unique_graphs
@@ -128,6 +127,8 @@ class Profiler:
 
         unique_graphs = Profiler.unique_graphs
         Profiler.unique_graphs = 0
+        # we counted one extra op that is part of the profiler setup code
+        total_ops -= 1
 
         return ProfileResult(
             captured=ProfileMetrics(
@@ -145,33 +146,10 @@ class Profiler:
         )
 
 
-def shapes_of(it):
-    if it:
-        return [tuple(getattr(x, "shape", [])) for x in it]
-
-
 def fx_insert_profiling(gm: torch.fx.GraphModule, example_inputs: List[Any]):
-    input_shapes = shapes_of(example_inputs)
-    output_shapes = None
-
-    def debug_print(extra):
-        gm.graph.print_tabular()
-        return f"shape mismatch in={input_shapes} out={output_shapes} got={extra}"
-
     def _wrapped(*args):
-        nonlocal output_shapes
         with torch.profiler.record_function("TORCHDYNAMO"):
-            assert (
-                shapes_of(args) == input_shapes or config.dynamic_shapes
-            ), debug_print(shapes_of(args))
-            result = gm.forward(*args)
-            if output_shapes is None:
-                output_shapes = shapes_of(result)
-            else:
-                assert (
-                    shapes_of(result) == output_shapes or config.dynamic_shapes
-                ), debug_print(shapes_of(result))
-            return result
+            return gm.forward(*args)
 
     Profiler.unique_graphs += 1
     return _wrapped

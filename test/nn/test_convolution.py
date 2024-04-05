@@ -37,6 +37,7 @@ if TEST_SCIPY:
     import scipy.signal
     import scipy.ndimage
 
+
 class TestConvolutionNN(NNTestCase):
     _do_cuda_memory_leak_check = True
     _do_cuda_non_default_stream = True
@@ -60,7 +61,7 @@ class TestConvolutionNN(NNTestCase):
         self.assertEqual(m(input).size(), (1, 1, 1, 1))
 
     def test_invalid_conv1d(self):
-        for dtype in [torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
+        for dtype in [torch.half, torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
             module = nn.Conv1d(in_channels=3, out_channels=33, kernel_size=10, stride=1, bias=True).to(dtype)
             input = torch.randn(1, 3, 4).to(dtype)
             with self.assertRaisesRegex(RuntimeError,
@@ -100,7 +101,7 @@ class TestConvolutionNN(NNTestCase):
             self.assertEqual(y.sum(), 4186112.)
 
     def test_invalid_conv2d(self):
-        for dtype in [torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
+        for dtype in [torch.half, torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
             module = torch.nn.Conv2d(1, 1, kernel_size=3, dilation=2, stride=2).to(dtype)
             input = torch.empty(1, 1, 4, 4).to(dtype)
             self.assertRaises(RuntimeError, lambda: module(input))
@@ -125,7 +126,7 @@ class TestConvolutionNN(NNTestCase):
                 module(input)
 
     def test_invalid_conv3d(self):
-        for dtype in [torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
+        for dtype in [torch.half, torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
             module = torch.nn.Conv3d(1, 1, kernel_size=3, dilation=2, stride=2).to(dtype)
             input = torch.empty(1, 1, 4, 4, 4).to(dtype)
             self.assertRaises(RuntimeError, lambda: module(input))
@@ -377,9 +378,8 @@ class TestConvolutionNN(NNTestCase):
         self.assertRaisesRegex(RuntimeError, 'Specify retain_graph=True',
                                lambda: o1.sum().backward())
 
-
     def test_conv_modules_raise_error_on_incorrect_input_size(self):
-        for dtype in [torch.bfloat16, torch.double, torch.float]:
+        for dtype in [torch.half, torch.bfloat16, torch.double, torch.float]:
             modules = [nn.Conv1d(3, 8, 3).to(dtype), nn.ConvTranspose1d(3, 8, 3).to(dtype),
                        nn.Conv2d(3, 8, 3).to(dtype), nn.ConvTranspose2d(3, 8, 3).to(dtype),
                        nn.Conv3d(3, 8, 3).to(dtype), nn.ConvTranspose3d(3, 8, 3).to(dtype)]
@@ -402,7 +402,7 @@ class TestConvolutionNN(NNTestCase):
                 # just run it to ensure no exception raised.
                 module(input)
 
-        for dtype in [torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
+        for dtype in [torch.half, torch.bfloat16, torch.float, torch.double, torch.cfloat, torch.cdouble]:
             # Conv1d
             test(True, nn.Conv1d(1, 1, 3).to(dtype), (1, 2), dtype)
             test(True, nn.Conv1d(1, 1, 3, stride=2).to(dtype), (1, 2), dtype)
@@ -481,6 +481,7 @@ class TestConvolutionNN(NNTestCase):
     # For https://github.com/pytorch/pytorch/pull/1273
     # Almost identical to the above `test_Conv2d_naive_groups`
     @torch.backends.cudnn.flags(enabled=True, benchmark=False)
+    @unittest.skipIf(TEST_WITH_ROCM, "Skipped on ROCm, since it is failing on ROCm 5.7")
     def test_Conv2d_groups_nobias(self):
         dev_dtypes = [("cpu", torch.float)]
         if TEST_CUDA:
@@ -519,6 +520,7 @@ class TestConvolutionNN(NNTestCase):
     # See also https://github.com/pytorch/pytorch/pull/18463#issuecomment-476563686
     # and https://github.com/pytorch/pytorch/pull/18463#issuecomment-477001024
     @torch.backends.cudnn.flags(enabled=True, benchmark=False)
+    @unittest.skipIf(TEST_WITH_ROCM, "Skipped on ROCm, since it is failing on ROCm 5.7")
     def test_Conv2d_groups_nobias_v2(self):
         torch.manual_seed(123)
         dev_dtypes = [("cpu", torch.float)]
@@ -664,7 +666,6 @@ class TestConvolutionNN(NNTestCase):
         out = conv(input)
         self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
 
-
     @unittest.skipIf(not TEST_CUDA, "CUDA unavailable")
     def test_cudnn_noncontiguous_weight(self):
         # Noncontiguous weights must be contiguous() before being
@@ -674,7 +675,6 @@ class TestConvolutionNN(NNTestCase):
         weights2 = torch.tensor([1], dtype=torch.double, device="cuda").expand(1, 1, 2).contiguous()
         self.assertEqual(F.conv1d(input, weights1, bias=None, stride=2, dilation=2),
                          F.conv1d(input, weights2, bias=None, stride=2, dilation=2))
-
 
     def run_grad_conv_test(self, func_forward, func_backward, dim=1, gradient='input'):
         for kern, inp_size in [(3, 6), (3, 7), (4, 9)]:
@@ -742,7 +742,8 @@ class TestConvolutionNN(NNTestCase):
                     if has_bias:
                         bias = torch.randn([chan_out], requires_grad=True, dtype=torch.float)
                     output = torch._nnpack_spatial_convolution(input, weight, stride=stride, padding=padding, bias=bias)
-                    output_expected = torch.nn.functional.conv2d(input, weight, stride=stride, padding=padding, bias=bias)
+                    output_expected = torch.nn.functional.conv2d(
+                        input, weight, stride=stride, padding=padding, bias=bias)
                     self.assertEqual(output, output_expected, atol=3e-4, rtol=0)
 
                     gradient_o = torch.randn(output.shape, dtype=torch.float)
@@ -761,7 +762,6 @@ class TestConvolutionNN(NNTestCase):
 
         with self.assertRaisesRegex(ValueError, "Only \"zeros\" "):
             nn.ConvTranspose2d(3, 3, 3, padding_mode="reflect")
-
 
     def test_functional_grad_conv(self):
         # Conv 1D
@@ -817,7 +817,8 @@ class TestConvolutionNN(NNTestCase):
 
             input = torch.empty(BATCH_SIZE, IN_CH, SPATIAL, SPATIAL).uniform_(-8.0, 8.0).requires_grad_(True)
 
-            weight = torch.empty(OUT_CH, IN_CH // groups, kernel_size, kernel_size).uniform_(-4.0, 4.0).requires_grad_(True)
+            weight = torch.empty(OUT_CH, IN_CH // groups, kernel_size,
+                                 kernel_size).uniform_(-4.0, 4.0).requires_grad_(True)
 
             output = F.conv2d(input, weight,
                               stride=stride, padding=padding, dilation=dilation, groups=groups)
@@ -841,6 +842,30 @@ class TestConvolutionNN(NNTestCase):
 
         for s, k, g, d in product(strides, kernel_sizes, groups, dilates):
             _test_conv2d(s, k, g, d)
+
+    def test_permute_conv2d_issue_120211(self):
+        def reproducer(radius: int):
+            image = torch.rand(1, 1024, 1024, 3)
+            image = image.permute(0, 3, 1, 2)
+            kernel_x = torch.zeros([3, 1, 1, radius * 2 + 1], device=image.device)
+            image = torch.nn.functional.conv2d(image, kernel_x, groups=image.shape[-3])
+
+        for i in range(0, 128):
+            # This should not fail
+            reproducer(radius=i)
+
+    def test_conv3d_issue_120406(self):
+        # This should not fail
+        F.conv3d(torch.ones(2, 3, 8, 9, 26), torch.ones(3, 1, 1, 1, 17), groups=3)
+
+    def test_conv1d_issue_120547(self):
+        weight = torch.ones([16, 1, 32])
+        bias = torch.ones([16])
+        stride, padding, dilation, groups = (1, 16, 1, 16)
+        input = torch.rand((1, 1, 16))
+        input = input.transpose(1, 2)
+        # This should not fail
+        F.conv1d(input, weight, bias, stride, padding, dilation, groups)
 
 
 class TestConvolutionNNDeviceType(NNTestCase):
@@ -907,7 +932,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
             self.assertEqual(conv1.bias.grad.data, conv2.bias.grad.data, atol=0.0, rtol=0)
             self.assertEqual(conv1.weight.grad.data, conv2.weight.grad.data, atol=0.0, rtol=0)
 
-
     @onlyCUDA
     @dtypes(*floating_types_and(torch.half, *[torch.bfloat16] if AMPERE_OR_ROCM else []))
     def test_Conv2d_large_workspace(self, device, dtype):
@@ -930,7 +954,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
         run_test(benchmark=False)
         run_test(benchmark=True)
 
-
     @onlyCUDA
     @dtypes(torch.half, torch.float)
     def test_ConvTranspose2d_large_output_padding(self, device, dtype):
@@ -947,13 +970,12 @@ class TestConvolutionNNDeviceType(NNTestCase):
         x.backward(torch.randn_like(x))
         torch.cuda.synchronize()
 
-
     @onlyCUDA
-    @tf32_on_and_off(0.01)
     @dtypes(torch.float, torch.double, torch.half)
     # Very similar to test_Conv2d_naive_groups but with special care to handle
     # the number of groups == number of input channels
     @torch.backends.cudnn.flags(enabled=True, benchmark=False)
+    @tf32_on_and_off(0.01)
     def test_Conv2d_depthwise_naive_groups(self, device, dtype):
         for depth_multiplier in [1, 2]:
             m = nn.Conv2d(2, 2 * depth_multiplier, kernel_size=3, groups=2).to(device, dtype)
@@ -995,7 +1017,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
     @onlyCUDA
     @dtypes(torch.float, torch.double, torch.half)
     @torch.backends.cudnn.flags(enabled=True, benchmark=False)
-    @tf32_on_and_off(0.005)
+    @tf32_on_and_off(0.01)
     def test_Conv3d_depthwise_naive_groups(self, device, dtype):
         for depth_multiplier in [1, 2]:
             m = nn.Conv3d(2, 2 * depth_multiplier, kernel_size=3, groups=2).to(device, dtype)
@@ -1035,7 +1057,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
                              torch.cat([m1.weight.grad.data,
                                         m2.weight.grad.data], 0),
                              atol=atol, rtol=rtol)
-
 
     @onlyCUDA
     @dtypes(*floating_types_and(torch.half, *[torch.bfloat16] if AMPERE_OR_ROCM else []))
@@ -1079,7 +1100,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
                                     "\ninp_size: " + str(inp_size) +
                                     "\ndilation: " + str(dilation))
 
-
     def test_conv_double_backward_no_bias(self):
         kern = 3
         stride = 2
@@ -1104,7 +1124,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
                         "\nbatch_size: " + str(batch_size) +
                         "\ninp_size: " + str(inp_size) +
                         "\ndilation: " + str(dilation))
-
 
     def test_conv_double_backward_groups(self):
         kern = 3
@@ -1131,7 +1150,6 @@ class TestConvolutionNNDeviceType(NNTestCase):
                         "\ninp_size: " + str(inp_size) +
                         "\ndilation: " + str(dilation) +
                         "\ngroups: " + str(groups))
-
 
     def test_conv_double_backward_stride(self):
         batch_size = 2
@@ -1271,28 +1289,29 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
         # Symmetric padding
         z = F.conv1d(x, y, padding=3, dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv1d(x, y, padding='same', dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
         x.grad, y.grad = None, None
 
         # Asymmetric padding
         z = F.conv1d(x, y, padding=2)[..., 1:]
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv1d(x, y, padding='same')
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
 
     @dtypes(torch.float, torch.cfloat)
+    @tf32_on_and_off(0.001)
     def test_conv2d_same_padding_backward(self, device, dtype):
         # Test F.conv2d gradients work with padding='same'
         x = torch.rand(1, 1, 10, 11, device=device, dtype=dtype, requires_grad=True)
@@ -1300,12 +1319,12 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
         # Symmetric padding
         z = F.conv2d(x, y, padding=(3, 4), dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv2d(x, y, padding='same', dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
         x.grad, y.grad = None, None
@@ -1313,12 +1332,12 @@ class TestConvolutionNNDeviceType(NNTestCase):
         # Asymmetric padding
         y = torch.rand(1, 1, 4, 4, device=device, dtype=dtype, requires_grad=True)
         z = F.conv2d(x, y, padding=2)[..., 1:, 1:]
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv2d(x, y, padding='same')
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
 
@@ -1332,12 +1351,12 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
         # Symmetric padding
         z = F.conv3d(x, y, padding=(0, 1, 4), dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv3d(x, y, padding='same', dilation=2)
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
         x.grad, y.grad = None, None
@@ -1352,12 +1371,12 @@ class TestConvolutionNNDeviceType(NNTestCase):
         # Asymmetric padding
         y = torch.rand(1, 1, 1, 4, 4, dtype=dtype, device=device, requires_grad=True)
         z = F.conv3d(x, y, padding=2)[..., 1:, 1:]
-        z.sum().backward()
+        z.sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
         z = F.conv3d(x, y, padding='same')
-        z.sum().backward()
+        z.sum().abs().backward()
         self.assertEqual(gx_expect, x.grad)
         self.assertEqual(gy_expect, y.grad)
 
@@ -1373,11 +1392,11 @@ class TestConvolutionNNDeviceType(NNTestCase):
         # Test F.conv1d gradients work with padding='valid'
         x = torch.rand(1, 1, 10, dtype=dtype, device=device, requires_grad=True)
         y = torch.rand(1, 1, 4, dtype=dtype, device=device, requires_grad=True)
-        F.conv1d(x, y, padding=0).sum().backward()
+        F.conv1d(x, y, padding=0).sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
-        F.conv1d(x, y, padding='valid').sum().backward()
+        F.conv1d(x, y, padding='valid').sum().abs().backward()
         gx_actual, gy_actual = x.grad, y.grad
         self.assertEqual(gx_expect, gx_actual)
         self.assertEqual(gy_expect, gy_actual)
@@ -1511,11 +1530,11 @@ class TestConvolutionNNDeviceType(NNTestCase):
         # Test F.conv2d gradients work with padding='valid'
         x = torch.rand(1, 1, 1, 10, device=device, dtype=dtype, requires_grad=True)
         y = torch.rand(1, 1, 1, 4, device=device, dtype=dtype, requires_grad=True)
-        F.conv2d(x, y, padding=0).sum().backward()
+        F.conv2d(x, y, padding=0).sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
-        F.conv2d(x, y, padding='valid').sum().backward()
+        F.conv2d(x, y, padding='valid').sum().abs().backward()
         gx_actual, gy_actual = x.grad, y.grad
         self.assertEqual(gx_expect, gx_actual)
         self.assertEqual(gy_expect, gy_actual)
@@ -1527,11 +1546,11 @@ class TestConvolutionNNDeviceType(NNTestCase):
         # Test F.conv3d gradients work with padding='valid'
         x = torch.rand(1, 1, 1, 1, 10, dtype=dtype, device=device, requires_grad=True)
         y = torch.rand(1, 1, 1, 1, 4, dtype=dtype, device=device, requires_grad=True)
-        F.conv3d(x, y, padding=0).sum().backward()
+        F.conv3d(x, y, padding=0).sum().abs().backward()
         gx_expect, gy_expect = x.grad, y.grad
         x.grad, y.grad = None, None
 
-        F.conv3d(x, y, padding='valid').sum().backward()
+        F.conv3d(x, y, padding='valid').sum().abs().backward()
         gx_actual, gy_actual = x.grad, y.grad
         self.assertEqual(gx_expect, gx_actual)
         self.assertEqual(gy_expect, gy_actual)
@@ -1539,13 +1558,13 @@ class TestConvolutionNNDeviceType(NNTestCase):
         gradcheck(lambda x, y: F.conv3d(x, y, padding='valid'), (x, y), check_forward_ad=check_forward_ad)
         gradgradcheck(lambda x, y: F.conv3d(x, y, padding='valid'), (x, y), check_fwd_over_rev=check_forward_ad)
 
-    @parametrize_test("N", range(2, 4), name_fn=lambda N: 'ConvTranspose{}d'.format(N))
+    @parametrize_test("N", range(2, 4), name_fn=lambda N: f'ConvTranspose{N}d')
     def test_conv_transpose_with_output_size_and_no_batch_dim(self, device, N):
         # For inputs with no batch dim, verify output is the correct shape when output_size is set.
         # See https://github.com/pytorch/pytorch/issues/75889
         inp = torch.randn((1, 15, 13) if N == 2 else (1, 15, 13, 13), device=device)
         output_size = (1, 240, 200) if N == 2 else (1, 240, 200, 200)
-        ConvTransposeNd = getattr(nn, 'ConvTranspose{}d'.format(N))
+        ConvTransposeNd = getattr(nn, f'ConvTranspose{N}d')
         m = ConvTransposeNd(1, 1, kernel_size=16, stride=16, padding=7, bias=False, device=device)
         output = m(inp, output_size=output_size)
         self.assertEqual(output.shape, output_size)
@@ -1747,7 +1766,8 @@ class TestConvolutionNNDeviceType(NNTestCase):
             # Forward AD and forward-over-reverse AD smoke test in float32
             # TODO: remove this if we introduce per-op gradient tests for float32
             with fwAD.dual_level():
-                dual_inputs = [(fwAD.make_dual(i, torch.rand_like(i)) if isinstance(i, torch.Tensor) else i) for i in inputs]
+                dual_inputs = [(fwAD.make_dual(i, torch.rand_like(i)) if isinstance(i, torch.Tensor) else i)
+                               for i in inputs]
                 # Forward AD
                 output = convolution(*dual_inputs)
                 # Forward over reverse AD
@@ -1777,11 +1797,10 @@ class TestConvolutionNNDeviceType(NNTestCase):
             bias.requires_grad_(False)
         self.assertTrue(gradgradcheck(convolution, inputs, nondet_tol=gradcheck_nondet_tol))
 
-
     @onlyCPU
     def test_conv_contiguous_for_oneDNN(self):
         # See https://github.com/pytorch/pytorch/issues/80837.
-        for dtype in [torch.float, torch.bfloat16]:
+        for dtype in [torch.float, torch.bfloat16, torch.half]:
             conv = nn.Conv2d(
                 1,
                 128,
@@ -1807,7 +1826,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
     @onlyCPU
     def test_conv_ic1_channels_last_for_oneDNN(self):
         # See https://github.com/pytorch/pytorch/issues/82060, N > 1 will call in OneDNN path.
-        for dtype in [torch.float, torch.bfloat16]:
+        for dtype in [torch.float, torch.bfloat16, torch.half]:
             conv = torch.nn.Conv2d(1, 64, kernel_size=(3, 3), padding=(1, 1), bias=False)
             conv = conv.to(memory_format=torch.channels_last).to(dtype=dtype)
             x = torch.rand(2, 1, 100, 100).to(dtype=dtype)
@@ -1880,7 +1899,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
         input_large = torch.randn(1, 2, 1024, 1024 * 1024, dtype=dtype, device=device)
         conv1(input_large)
         conv2 = torch.nn.Conv2d(1, 1024, 1, 1).to(device).to(dtype)
-        input_large = torch.randn(1, 1, 2048, 1024 , dtype=dtype, device=device)
+        input_large = torch.randn(1, 1, 2048, 1024, dtype=dtype, device=device)
         conv2(input_large)
 
     def test_conv_noncontig_weights(self, device):
@@ -1892,9 +1911,9 @@ class TestConvolutionNNDeviceType(NNTestCase):
                 w = w.expand([nc, int(nc / groups)] + list(w.shape))
                 w = w.detach().requires_grad_()
                 x = torch.randn([1, nc] + ([5] * dim), device=device, requires_grad=True)
-                y = getattr(F, 'conv{}d'.format(dim))(x, w, groups=groups)
+                y = getattr(F, f'conv{dim}d')(x, w, groups=groups)
                 y.sum().backward()
-                y = getattr(F, 'conv_transpose{}d'.format(dim))(x, w, groups=groups)
+                y = getattr(F, f'conv_transpose{dim}d')(x, w, groups=groups)
                 y.sum().backward()
 
     def test_conv_noncontig_weights_and_bias(self, device):
@@ -1924,6 +1943,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
     @onlyCUDA
     @largeTensorTest('12GB')
+    @skipIfRocmVersionLessThan((6, 0))
     def test_conv_transposed_large(self, device):
         dtype = torch.half if self.device_type == 'cuda' else torch.float
         conv = nn.ConvTranspose2d(1, 1, 1, 1, bias=False).to(device).to(dtype)
@@ -2048,11 +2068,13 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
             self.assertEqual(y_cpu, y_cuda, atol=1e-5, rtol=0, exact_device=False)
             self.assertEqual(conv_cpu.bias.grad.data, conv_cuda.bias.grad.data, atol=1e-5, rtol=0, exact_device=False)
-            self.assertEqual(conv_cpu.weight.grad.data, conv_cuda.weight.grad.data, atol=1e-5, rtol=0, exact_device=False)
+            self.assertEqual(conv_cpu.weight.grad.data, conv_cuda.weight.grad.data,
+                             atol=1e-5, rtol=0, exact_device=False)
 
     @dtypesIfCUDA(*floating_types_and(torch.half, *[torch.bfloat16] if AMPERE_OR_ROCM else []))
     @dtypes(torch.float)
     @torch.backends.cudnn.flags(enabled=True, benchmark=False)
+    @unittest.skipIf(TEST_WITH_ROCM, "Skipped on ROCm, since it is failing on ROCm 5.7")
     def test_Conv2d_naive_groups(self, device, dtype):
         # Check that grouped convolutions matches two half convolutions
         m = nn.Conv2d(4, 4, kernel_size=3, groups=2).to(device, dtype)
@@ -2382,7 +2404,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
                 cudnn_out = torch.cudnn_convolution_relu(inp, w, None, (1, 1), (0, 0), (1, 1), 1)
             self.assertTrue(cudnn_out.is_contiguous(memory_format=memory_format))
             if tf32_is_not_fp32() and dtype == torch.float:
-                self.assertEqual(conv2d_out.relu(), cudnn_out, atol=2e-4, rtol=0.006)
+                self.assertEqual(conv2d_out.relu(), cudnn_out, atol=4e-3, rtol=0.006)
             else:
                 self.assertEqual(conv2d_out.relu(), cudnn_out)
 
@@ -2415,7 +2437,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
 
             self.assertTrue(cudnn_out.is_contiguous(memory_format=memory_format))
             if tf32_is_not_fp32() and dtype == torch.float:
-                self.assertEqual(F.relu(conv2d_out + alpha * z), cudnn_out, atol=3e-4, rtol=0.006)
+                self.assertEqual(F.relu(conv2d_out + alpha * z), cudnn_out, atol=2e-3, rtol=0.006)
             else:
                 self.assertEqual(F.relu(conv2d_out + alpha * z), cudnn_out)
 
@@ -2437,6 +2459,20 @@ class TestConvolutionNNDeviceType(NNTestCase):
             nn.BatchNorm2d(4)).to(device).float()
         for memory_format in [torch.channels_last, torch.contiguous_format]:
             model = nn.utils.convert_conv2d_weight_memory_format(model, memory_format)
+            out = model(input)
+            self.assertTrue(out.is_contiguous(memory_format=memory_format))
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @skipCUDAIfCudnnVersionLessThan(7603)
+    def test_convert_conv3d_weight_memory_format(self, device):
+
+        input = torch.randint(1, 10, (2, 8, 4, 4, 4), dtype=torch.float32, device=device)
+        model = nn.Sequential(
+            nn.ConvTranspose3d(8, 4, 3),
+            nn.BatchNorm3d(4)).to(device).float()
+        for memory_format in [torch.channels_last_3d, torch.contiguous_format]:
+            model = nn.utils.convert_conv3d_weight_memory_format(model, memory_format)
             out = model(input)
             self.assertTrue(out.is_contiguous(memory_format=memory_format))
 
@@ -2481,6 +2517,7 @@ class TestConvolutionNNDeviceType(NNTestCase):
         yref = m(x)
         y = m.to(device=device)(x.to(device=device))
         self.assertEqual(yref, y)
+
 
 instantiate_device_type_tests(TestConvolutionNNDeviceType, globals())
 instantiate_parametrized_tests(TestConvolutionNN)

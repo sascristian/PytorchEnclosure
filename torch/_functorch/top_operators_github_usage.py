@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 """
 From https://docs.google.com/spreadsheets/d/12R3nCOLskxPYjjiNkdqy4OdQ65eQp_htebXGODsjSeA/edit#gid=0
 Try to keep this list in sync with that.
@@ -600,7 +602,7 @@ method_only_ops = [
 
 
 def get_nn_functional_top_list():
-    top_nn_functional_ = {k: v for k, v in top_nn_functional}
+    top_nn_functional_ = dict(top_nn_functional)
     for _, count, functional_name in top_nn_module:
         if functional_name is None:
             continue
@@ -611,7 +613,7 @@ def get_nn_functional_top_list():
         else:
             top_nn_functional_[functional_name] += count
 
-    top_nn_functional_ = [(k, v) for k, v in top_nn_functional_.items()]
+    top_nn_functional_ = list(top_nn_functional_.items())
     top_nn_functional_.sort(key=lambda x: x[1], reverse=True)
     return top_nn_functional_
 

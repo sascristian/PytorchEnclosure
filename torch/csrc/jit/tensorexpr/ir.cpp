@@ -1,6 +1,5 @@
 #include <torch/csrc/jit/tensorexpr/ir.h>
-
-#include <torch/csrc/jit/tensorexpr/tensor.h>
+#include <torch/csrc/jit/tensorexpr/stmt.h>
 
 #include <c10/util/irange.h>
 
@@ -20,7 +19,7 @@ static Dtype dtypeOfIndices(const std::vector<ExprPtr>& indices) {
   return indices.at(0)->dtype();
 }
 
-void castIndicesToInts(std::vector<ExprPtr>& indices) {
+static void castIndicesToInts(std::vector<ExprPtr>& indices) {
   // Cast all indices to either Int or Long
   auto index_dtype = ScalarType::Int;
   for (auto& index : indices) {

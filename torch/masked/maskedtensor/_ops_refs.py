@@ -1,7 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
 from functools import partial
+from typing import Callable, Any, Dict, TYPE_CHECKING
 import torch
+
+if TYPE_CHECKING:
+    import torch._ops
 
 from .binary import (
     _apply_native_binary,
@@ -210,7 +214,7 @@ def _function_to_sparse_csr(func, *args, **kwargs):
     return _MaskedToSparseCsr.apply(args[0])
 
 
-_MASKEDTENSOR_DISPATCH_TABLE = {}
+_MASKEDTENSOR_DISPATCH_TABLE: Dict["torch._ops.OpOverload", Callable[..., Any]] = {}
 
 def register_dispatch_func(aten_ops):
     """
@@ -394,8 +398,8 @@ def where(func, *args, **kwargs):
     return MaskedTensor(new_data, new_mask)
 
 
-@register_dispatch_func([torch.ops.aten.to_sparse])
-def to_sparse(func, *args, **kwargs):
+@register_dispatch_func([torch.ops.aten._to_sparse])
+def _to_sparse(func, *args, **kwargs):
     _check_args_kwargs_length(args, kwargs, f"__torch_dispatch__, {func}", len_args=1, len_kwargs=0)
     if not torch.is_tensor(args[0]):
         raise TypeError("__torch_dispatch__, {func}: expected args[0] to be a tensor")
@@ -409,8 +413,8 @@ def to_sparse(func, *args, **kwargs):
     return MaskedTensor(new_data, new_mask)
 
 
-@register_dispatch_func([torch.ops.aten.to_sparse_csr])
-def to_sparse_csr(func, *args, **kwargs):
+@register_dispatch_func([torch.ops.aten._to_sparse_csr])
+def _to_sparse_csr(func, *args, **kwargs):
     _check_args_kwargs_length(args, kwargs, f"__torch_dispatch__, {func}", len_args=1, len_kwargs=0)
     if not torch.is_tensor(args[0]):
         raise ValueError("__torch_dispatch__, {func}: expected args[0] to be a tensor")

@@ -26,9 +26,9 @@ template <typename scalar_t, typename accscalar_t,
     int kKnownKernelT, int kKnownKernelH, int kKnownKernelW,
     int kKnownDilationT, int kKnownDilationH, int kKnownDilationW>
 __global__ void conv_depthwise3d_cuda_kernel(
-    const PackedTensorAccessor32<scalar_t, 5> input,
+    const PackedTensorAccessor32<const scalar_t, 5> input,
     PackedTensorAccessor32<scalar_t, 5> output,
-    const PackedTensorAccessor32<scalar_t, 5> kernel,
+    const PackedTensorAccessor32<const scalar_t, 5> kernel,
     const scalar_t* bias,
     int strideT, int strideH, int strideW,
     int paddingT, int paddingH, int paddingW,
@@ -333,7 +333,7 @@ void conv_depthwise_shape_check(
   if (grad_output.defined()) {
     auto expected_output_size = conv_output_size(input.sizes(), weight.sizes(),
                                                  padding, stride, dilation);
-    TORCH_CHECK(grad_output.dim() == expected_output_size.size(),
+    TORCH_CHECK(static_cast<size_t>(grad_output.dim()) == expected_output_size.size(),
                 "Expect grad_output to be ",
                 expected_output_size.size(), "D, got ",
                 grad_output.dim(), "D.");
@@ -361,9 +361,9 @@ void conv_depthwise_shape_check(
     conv_depthwise3d_cuda_kernel                                            \
     <scalar_t, accscalar_t, (kt), (kh), (kw), (dilt), (dilh), (dilw)>       \
       <<<grid, block, (smem), at::cuda::getCurrentCUDAStream()>>>(          \
-        input_.packed_accessor32<scalar_t, 5>(),                            \
+        input_.packed_accessor32<const scalar_t, 5>(),                      \
         output_.packed_accessor32<scalar_t, 5>(),                           \
-        weight_.packed_accessor32<scalar_t, 5>(),                           \
+        weight_.packed_accessor32<const scalar_t, 5>(),                     \
         bias_ptr,                                                           \
         stride[0], stride[1], stride[2],                                    \
         padding[0], padding[1], padding[2],                                 \
@@ -377,9 +377,9 @@ void conv_depthwise_shape_check(
     conv_depthwise3d_cuda_kernel                                            \
     <scalar_t,accscalar_t, -1, -1, -1, -1, -1, -1>                          \
       <<<grid, block, (smem), at::cuda::getCurrentCUDAStream()>>>(          \
-        input_.packed_accessor32<scalar_t, 5>(),                            \
+        input_.packed_accessor32<const scalar_t, 5>(),                      \
         output_.packed_accessor32<scalar_t, 5>(),                           \
-        weight_.packed_accessor32<scalar_t, 5>(),                           \
+        weight_.packed_accessor32<const scalar_t, 5>(),                     \
         bias_ptr,                                                           \
         stride[0], stride[1], stride[2],                                    \
         padding[0], padding[1], padding[2],                                 \
@@ -423,7 +423,9 @@ Tensor conv_depthwise3d_cuda(
   Tensor weight_ = weight.contiguous();
   Tensor bias_ = bias.defined() ? bias.contiguous() : bias;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      kHalf,
+      kBFloat16,
       input.scalar_type(),
       "conv_depthwise3d",
       [&]{
@@ -433,7 +435,7 @@ Tensor conv_depthwise3d_cuda(
         int64_t smem = 0;
 
         const scalar_t* bias_ptr =
-            bias_.defined() ? bias_.data_ptr<scalar_t>() : NULL;
+            bias_.defined() ? bias_.const_data_ptr<scalar_t>() : NULL;
 
         // Range check to avoid overflow in CUDA kernels.
         TORCH_CHECK(input_.numel() <= std::numeric_limits<int32_t>::max(),
@@ -551,7 +553,9 @@ std::tuple<Tensor&, Tensor&, Tensor&> _depthwise_3d_backward_cuda_out(
 
   if (output_mask[0]) {
     const Tensor weight_ = weight.contiguous();
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        kHalf,
+        kBFloat16,
         grad_output.scalar_type(),
         "conv_depthwise3d",
         [&] {
@@ -586,7 +590,9 @@ std::tuple<Tensor&, Tensor&, Tensor&> _depthwise_3d_backward_cuda_out(
 
   if (output_mask[1]) {
     const Tensor input_ = input.contiguous();
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        kHalf,
+        kBFloat16,
         grad_output.scalar_type(),
         "conv_depthwise3d",
         [&] {

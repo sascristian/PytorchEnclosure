@@ -72,9 +72,9 @@ void TensorBase::enforce_invariants() {
 
 void TensorBase::print() const {
   if (defined()) {
-    std::cerr << "[" << toString() << " " << sizes() << "]" << std::endl;
+    std::cerr << "[" << toString() << " " << sizes() << "]" << '\n';
   } else {
-    std::cerr << "[UndefinedTensor]" << std::endl;
+    std::cerr << "[UndefinedTensor]" << '\n';
   }
 }
 
@@ -83,7 +83,16 @@ std::string TensorBase::toString() const {
   if (scalar_type() == ScalarType::Undefined) {
     base_str = "UndefinedType";
   } else {
-    base_str = std::string(at::toString(options().computeDispatchKey())) + at::toString(scalar_type()) + "Type";
+    auto dispatchkey = options().computeDispatchKey();
+    std::string dispatchkey_str;
+    if (dispatchkey == c10::DispatchKey::PrivateUse1) {
+      dispatchkey_str = c10::get_privateuse1_backend();
+    } else if (dispatchkey == c10::DispatchKey::AutocastPrivateUse1) {
+      dispatchkey_str = "Autocast" + c10::get_privateuse1_backend();
+    } else {
+      dispatchkey_str = at::toString(dispatchkey);
+    }
+    base_str = dispatchkey_str + at::toString(scalar_type()) + "Type";
   }
   return base_str;
 }

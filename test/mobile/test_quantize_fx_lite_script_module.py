@@ -58,7 +58,7 @@ class TestLiteFuseFx(QuantizationLiteTestCase):
     def test_conv2d(self):
         class M(torch.nn.Module):
             def __init__(self):
-                super(M, self).__init__()
+                super().__init__()
                 self.conv1 = nn.Conv2d(1, 1, 1)
                 self.conv2 = nn.Conv2d(1, 1, 1)
 
@@ -100,4 +100,4 @@ class TestLiteFuseFx(QuantizationLiteTestCase):
 
 
 if __name__ == "__main__":
-    run_tests()
+    run_tests()  # noqa: F821

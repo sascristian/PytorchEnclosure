@@ -6,7 +6,6 @@
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
 #include <c10/util/MathConstants.h>
-#include <c10/util/math_compat.h>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
@@ -484,6 +483,14 @@ static inline float calc_digamma(float x) {
     y = z * polevl(z, A, 6);
   }
   return result + logf(x) - (0.5f / x) - y;
+}
+
+static inline c10::BFloat16 calc_digamma(c10::BFloat16 a) {
+  return calc_digamma(static_cast<float>(a));
+}
+
+static inline c10::Half calc_digamma(c10::Half a) {
+  return calc_digamma(static_cast<float>(a));
 }
 
 template <typename scalar_t, bool is_cuda=false>
@@ -3042,7 +3049,7 @@ static inline C10_HOST_DEVICE T hermite_polynomial_h_forward(T x, int64_t n) {
 
     T p = T(1.0);
     T q = x + x;
-    T r;
+    T r = T(0.0);
 
     for (int64_t k = 2; k < n + n; k += 2) {
         r = (x + x) * q - k * p;
@@ -3053,9 +3060,14 @@ static inline C10_HOST_DEVICE T hermite_polynomial_h_forward(T x, int64_t n) {
     return r;
 } // hermite_polynomial_h_forward(T x, int64_t n)
 
-template<typename T, bool is_cuda=false>
+template<typename T, bool is_cuda=false, std::enable_if_t<!std::is_floating_point<T>::value, int> = 0>
 static inline C10_HOST_DEVICE T hermite_polynomial_h_forward(T x, T n) {
     return hermite_polynomial_h_forward(x, static_cast<int64_t>(n));
+} // hermite_polynomial_h_forward(T x, T n)
+
+template<typename T, bool is_cuda=false, std::enable_if_t<std::is_floating_point<T>::value, int> = 0>
+static inline C10_HOST_DEVICE T hermite_polynomial_h_forward(T x, T n) {
+    return hermite_polynomial_h_forward(x, ((!std::isinf(n)) && (!std::isnan(n))) ? static_cast<int64_t>(n) : static_cast<int64_t>(-1));
 } // hermite_polynomial_h_forward(T x, T n)
 
 template<typename T>

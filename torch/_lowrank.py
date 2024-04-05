@@ -116,7 +116,8 @@ def svd_lowrank(
                                integer, and defaults to 2
 
         M (Tensor, optional): the input tensor's mean of size
-                              :math:`(*, 1, n)`.
+                              :math:`(*, 1, n)`, which will be broadcasted
+                              to the size of A in this function.
 
     References::
         - Nathan Halko, Per-Gunnar Martinsson, and Joel Tropp, Finding
@@ -149,6 +150,7 @@ def _svd_lowrank(
     if M is None:
         M_t = None
     else:
+        M = M.broadcast_to(A.size())
         M_t = _utils.transpose(M)
     A_t = _utils.transpose(A)
 
@@ -263,11 +265,10 @@ def pca_lowrank(
         q = min(6, m, n)
     elif not (q >= 0 and q <= min(m, n)):
         raise ValueError(
-            "q(={}) must be non-negative integer"
-            " and not greater than min(m, n)={}".format(q, min(m, n))
+            f"q(={q}) must be non-negative integer and not greater than min(m, n)={min(m, n)}"
         )
     if not (niter >= 0):
-        raise ValueError("niter(={}) must be non-negative integer".format(niter))
+        raise ValueError(f"niter(={niter}) must be non-negative integer")
 
     dtype = _utils.get_floating_dtype(A)
 
