@@ -1,3 +1,5 @@
+# mypy: allow-untyped-defs
+
 from __future__ import annotations
 
 import ast
@@ -17,25 +19,45 @@ import sys
 import textwrap
 import types
 import weakref
+from contextlib import contextmanager
+from copy import deepcopy
 from inspect import currentframe, getframeinfo
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    TYPE_CHECKING,
+    Union,
+)
 from weakref import ReferenceType
-
-
-try:
-    import numpy as np
-except ModuleNotFoundError:
-    np = None  # type: ignore[assignment]
 
 import torch
 import torch.utils._device
+from torch._C._dynamo.guards import (
+    check_obj_id,
+    check_type_id,
+    dict_version,
+    DictGuardManager,
+    install_no_tensor_aliasing_guard,
+    install_object_aliasing_guard,
+    RootGuardManager,
+    TensorGuards,
+)
 from torch._dynamo.source import (
+    is_from_flatten_script_object_source,
     is_from_local_source,
     is_from_optimizer_source,
     TensorProperty,
     TensorPropertySource,
 )
 from torch._guards import (
+    CompileContext,
+    CompileId,
     DuplicateInputs,
     Guard,
     GuardBuilderBase,
@@ -43,8 +65,8 @@ from torch._guards import (
     GuardSource,
     Source,
 )
-
 from torch._logging import structured
+from torch._utils_internal import justknobs_check
 from torch.fx.experimental.symbolic_shapes import (
     EqualityConstraint,
     is_symbolic,
@@ -55,12 +77,14 @@ from torch.utils.weak import TensorWeakRef
 
 from . import config, convert_frame, exc, mutation_guard
 from .eval_frame import set_guard_error_hook
-
 from .source import (
+    AttrProxySource,
     AttrSource,
+    CallFunctionNoArgsSource,
     ChainedSource,
     ConstDictKeySource,
     DefaultsSource,
+    FlattenScriptObjectSource,
     FSDPNNModuleSource,
     GetItemSource,
     GlobalSource,
@@ -69,18 +93,27 @@ from .source import (
     GradSource,
     LocalSource,
     NNModuleSource,
-    NotNNModuleSource,
     NumpyTensorSource,
     ODictGetItemSource,
     OptimizerSource,
+    ScriptObjectQualifiedNameSource,
     ShapeEnvSource,
+    SubclassAttrListSource,
+    TorchFunctionModeStackSource,
     TupleIteratorGetItemSource,
     TypeSource,
+    UnspecializedBuiltinNNModuleSource,
+    UnspecializedNNModuleSource,
+    UnspecializedParamBufferSource,
+    WeakRefCallSource,
 )
 from .types import CacheEntry, ExtraState, GuardedCode, GuardFail, GuardFn  # noqa: F401
 from .utils import (
     common_constant_types,
     dict_keys_repr,
+    get_custom_getattr,
+    get_torch_function_mode_stack,
+    get_torch_function_mode_stack_at,
     guard_failures,
     istype,
     key_is_id,
@@ -89,7 +122,20 @@ from .utils import (
     tensor_always_has_static_shape,
     tuple_iterator_getitem,
     tuple_iterator_len,
+    unpatched_nn_module_getattr,
+    verify_guard_fn_signature,
 )
+
+
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None  # type: ignore[assignment]
+
+
+if TYPE_CHECKING:
+    from sympy import Symbol
+
 
 log = logging.getLogger(__name__)
 guards_log = torch._logging.getArtifactLogger(__name__, "guards")
@@ -98,18 +144,6 @@ recompiles_verbose_log = torch._logging.getArtifactLogger(
     __name__, "recompiles_verbose"
 )
 verbose_guards_log = torch._logging.getArtifactLogger(__name__, "verbose_guards")
-
-TensorGuards = torch._C._dynamo.guards.TensorGuards
-check_obj_id = torch._C._dynamo.guards.check_obj_id
-check_type_id = torch._C._dynamo.guards.check_type_id
-dict_version = torch._C._dynamo.guards.dict_version
-
-RootGuardManager = torch._C._dynamo.guards.RootGuardManager
-DictGuardManager = torch._C._dynamo.guards.DictGuardManager
-install_tensor_aliasing_guard = torch._C._dynamo.guards.install_tensor_aliasing_guard
-install_no_tensor_aliasing_guard = (
-    torch._C._dynamo.guards.install_no_tensor_aliasing_guard
-)
 
 
 class GuardManager:
@@ -125,13 +159,24 @@ class GuardManager:
 
         self.closure_vars = None
         self.args = None
-        self.code_parts = None
+        self.code_parts = []
         self.verbose_code_parts = None
         self.global_scope = None
         self.guard_fail_fn = None
         self.cache_entry = None
         self.extra_state = None
         self.id_matched_objs = None
+        self.no_tensor_aliasing_sources = []
+
+        self.print_no_tensor_aliasing_guard = True
+
+    @contextmanager
+    def _preserve_print_no_tensor_aliasing_flag(self):
+        self.print_no_tensor_aliasing_guard = True
+        try:
+            yield
+        finally:
+            self.print_no_tensor_aliasing_guard = True
 
     def get_guard_lines(self, guard):
         guard_name = guard.__class__.__name__
@@ -139,37 +184,53 @@ class GuardManager:
         parts = [guard_name + ": " + part for part in parts]
         return parts
 
-    def get_manager_line(self, accessor_str, guard_manager):
+    def get_manager_line(self, guard_manager, accessor_str=None):
         source = guard_manager.get_source()
         t = guard_manager.__class__.__name__
-        s = t + "(source = " + source + ", accessor = " + accessor_str + ")"
+        s = t + ": source=" + source
+        if accessor_str:
+            s += ", " + accessor_str
         return s
 
     def construct_dict_manager_string(self, mgr, body):
         for idx, (key_mgr, val_mgr) in sorted(mgr.get_key_value_managers().items()):
-            if key_mgr:
-                accessor = f"KeyManager(index={idx})"
-                body.writeline(self.get_manager_line(accessor, key_mgr))
-                self.construct_manager_string(key_mgr, body)
+            body.writeline(f"KeyValueManager pair at index={idx}")
+            with body.indent():
+                if key_mgr:
+                    body.writeline(f"KeyManager: {self.get_manager_line(key_mgr)}")
+                    self.construct_manager_string(key_mgr, body)
 
-            if val_mgr:
-                accessor = f"ValueManager(index={idx})"
-                body.writeline(self.get_manager_line(accessor, val_mgr))
-                self.construct_manager_string(val_mgr, body)
+                if val_mgr:
+                    body.writeline(f"ValueManager: {self.get_manager_line(val_mgr)}")
+                    self.construct_manager_string(val_mgr, body)
 
     def construct_manager_string(self, mgr, body):
         with body.indent():
             for guard in mgr.get_leaf_guards():
-                body.writelines(self.get_guard_lines(guard))
+                if isinstance(guard, torch._C._dynamo.guards.NO_TENSOR_ALIASING):  # type: ignore[attr-defined]
+                    if self.print_no_tensor_aliasing_guard:
+                        self.print_no_tensor_aliasing_guard = False
+                        body.writelines(self.get_guard_lines(guard))
+                    else:
+                        body.writelines(
+                            [
+                                guard.__class__.__name__,
+                            ]
+                        )
+                else:
+                    body.writelines(self.get_guard_lines(guard))
 
-            if istype(mgr, DictGuardManager):
+            # This works for both DictGuardManager and SubclassedDictGuardManager
+            if isinstance(mgr, DictGuardManager):
                 self.construct_dict_manager_string(mgr, body)
 
             # General case of GuardManager/RootGuardManager
             for accessor, child_mgr in zip(
                 mgr.get_accessors(), mgr.get_child_managers()
             ):
-                body.writeline(self.get_manager_line(accessor.repr(), child_mgr))
+                body.writeline(
+                    self.get_manager_line(child_mgr, f"accessed_by={accessor.repr()}")
+                )
                 self.construct_manager_string(child_mgr, body)
 
     def __str__(self):
@@ -185,15 +246,16 @@ class GuardManager:
                 else:
                     super().writeline("+- " + line)
 
-        body = IndentedBufferWithPrefix()
-        body.tabwidth = 1
-        body.writeline("", skip_prefix=True)
-        body.writeline("TREE_GUARD_MANAGER:", skip_prefix=True)
-        body.writeline("RootGuardManager")
-        self.construct_manager_string(self.root, body)
-        for guard in self.root.get_epilogue_lambda_guards():
-            body.writelines(self.get_guard_lines(guard))
-        return body.getvalue()
+        with self._preserve_print_no_tensor_aliasing_flag():
+            body = IndentedBufferWithPrefix()
+            body.tabwidth = 1
+            body.writeline("", skip_prefix=True)
+            body.writeline("TREE_GUARD_MANAGER:", skip_prefix=True)
+            body.writeline("RootGuardManager")
+            self.construct_manager_string(self.root, body)
+            for guard in self.root.get_epilogue_lambda_guards():
+                body.writelines(self.get_guard_lines(guard))
+            return body.getvalue()
 
     def check(self, x):
         # Only needed for debugging purposes.
@@ -202,6 +264,32 @@ class GuardManager:
     def check_verbose(self, x):
         # Only needed for debugging purposes.
         return self.root.check_verbose(x)
+
+    def populate_code_parts_for_debugging(self):
+        # This should be called when the guard manager is fully populated
+        tensor_aliasing_guard_seen = False
+
+        def get_code_parts(leaf_guard):
+            code_parts = []
+            for verbose_code_part in leaf_guard.verbose_code_parts():
+                code_part = verbose_code_part.split("#")[0].rstrip()
+                code_parts.append(code_part)
+            return code_parts
+
+        def visit(mgr):
+            nonlocal tensor_aliasing_guard_seen
+            for guard in mgr.get_leaf_guards():
+                if isinstance(guard, torch._C._dynamo.guards.NO_TENSOR_ALIASING):  # type: ignore[attr-defined]
+                    if not tensor_aliasing_guard_seen:
+                        self.code_parts.extend(get_code_parts(guard))
+                        tensor_aliasing_guard_seen = True
+                else:
+                    self.code_parts.extend(get_code_parts(guard))
+
+            for child_mgr in mgr.get_child_managers():
+                visit(child_mgr)
+
+        visit(self.root)
 
 
 def from_numpy(a):
@@ -220,25 +308,35 @@ def uninteresting_files():
     return {inspect.getfile(m) for m in mods}
 
 
-CLOSURE_VARS = {
-    "___check_type_id": check_type_id,
-    "___check_obj_id": check_obj_id,
-    "___odict_getitem": collections.OrderedDict.__getitem__,
-    "___key_to_id": key_to_id,
-    "___dict_version": dict_version,
-    "___dict_contains": lambda a, b: a in b,
-    "___tuple_iterator_len": tuple_iterator_len,
-    "___tuple_iterator_getitem": tuple_iterator_getitem,
-    "__math_isnan": math.isnan,
-    "__numpy_isnan": None if np is None else np.isnan,
-    "inf": float("inf"),
-    "__load_module": importlib.import_module,
-    "utils_device": torch.utils._device,
-    "device": torch.device,
-    "___from_numpy": from_numpy,
-    "torch": torch,
-    "inspect": inspect,
-}
+_CLOSURE_VARS: Optional[Dict[str, object]] = None
+
+
+def _get_closure_vars():
+    global _CLOSURE_VARS
+    if _CLOSURE_VARS is None:
+        _CLOSURE_VARS = {
+            "___check_type_id": check_type_id,
+            "___check_obj_id": check_obj_id,
+            "___odict_getitem": collections.OrderedDict.__getitem__,
+            "___key_to_id": key_to_id,
+            "___dict_version": dict_version,
+            "___dict_contains": lambda a, b: a in b,
+            "___tuple_iterator_len": tuple_iterator_len,
+            "___tuple_iterator_getitem": tuple_iterator_getitem,
+            "___get_torch_function_mode_stack_at": get_torch_function_mode_stack_at,
+            "__math_isnan": math.isnan,
+            "__numpy_isnan": None if np is None else np.isnan,
+            "inf": float("inf"),
+            "__load_module": importlib.import_module,
+            "utils_device": torch.utils._device,
+            "device": torch.device,
+            "___from_numpy": from_numpy,
+            "___as_tensor": torch._as_tensor_fullprec,
+            "torch": torch,
+            "inspect": inspect,
+        }
+    return _CLOSURE_VARS
+
 
 if sys.version_info[:2] <= (3, 8):
     # [Note: Python Version <= 3.8]
@@ -254,7 +352,6 @@ if sys.version_info[:2] <= (3, 8):
         HAS_UNPARSE_FUNCTIONS = True
     except ImportError:
         HAS_UNPARSE_FUNCTIONS = False
-        pass
 else:
     HAS_UNPARSE_FUNCTIONS = True
 
@@ -345,11 +442,26 @@ def get_key_index(dct, key):
 
 
 def get_key_index_source(source, index):
-    return f"{source}.keys()[{index}]"
+    return f"list({source}.keys())[{index}]"
+
+
+@dataclasses.dataclass(frozen=True)
+class NNModuleAttrAccessorInfo:
+    # Represents where is the attr name is present in the nn module attribute
+    # access
+
+    # Tells that the attribute can be accessed via __dict__
+    present_in_generic_dict: bool = False
+
+    # Either the actual name or _parameters/_buffers/_modules
+    l1_key: Optional[str] = None
+
+    # Actual paramter/buffer/submodule name
+    l2_key: Optional[str] = None
 
 
 def getitem_on_dict_manager(
-    source, base_guard_manager, base_example_value, example_value
+    source, base_guard_manager, base_example_value, example_value, guard_manager_enum
 ):
     base_source_name = source.base.name()
     source_name = source.name()
@@ -360,16 +472,28 @@ def getitem_on_dict_manager(
         index = get_key_index(base_example_value, source.index)
 
     key_source = get_key_index_source(base_source_name, index)
-    value_source = f"{base_source_name}[{key_source}]"
+    key_example_value = list(base_example_value.keys())[index]
+    if isinstance(key_example_value, (int, str)):
+        value_source = f"{base_source_name}[{key_example_value!r}]"
+    else:
+        value_source = f"{base_source_name}[{key_source}]"
     if not isinstance(source.index, ConstDictKeySource):
         # We have to insert a key manager guard here
         # TODO - source debug string is probably wrong here.
         base_guard_manager.get_key_manager(
-            index=index, source=key_source, example_value=source.index
-        ).add_equals_match_guard(source.index, [f"{key_source} == {source.index}"])
+            index=index,
+            source=key_source,
+            example_value=source.index,
+            guard_manager_enum=GuardManagerType.GUARD_MANAGER,
+        ).add_equals_match_guard(
+            source.index, [f"{key_source} == {key_example_value!r}"]
+        )
 
     return base_guard_manager.get_value_manager(
-        index=index, source=value_source, example_value=example_value
+        index=index,
+        source=value_source,
+        example_value=example_value,
+        guard_manager_enum=guard_manager_enum,
     )
 
 
@@ -384,6 +508,12 @@ def match_on_id_for_tensor(guard):
 class GuardCodeList:
     code_list: List[str]
     guard: Guard
+
+
+class GuardManagerType(enum.Enum):
+    GUARD_MANAGER = 1
+    DICT_GUARD_MANAGER = 2
+    DICT_SUBCLASS_GUARD_MANAGER = 3
 
 
 class GuardBuilder(GuardBuilderBase):
@@ -441,20 +571,68 @@ class GuardBuilder(GuardBuilderBase):
         self.tensor_check_guard_managers: List[GuardManager] = []
 
         self.check_fn_manager: CheckFunctionManager = check_fn_manager
+
+        # Collect the ids of dicts which need key order guarding. source_name is
+        # not sufficient because for nn modules, we can have different sources
+        # to access the same object - self._module["param"] is same as
+        # self.param.
+        self.key_order_guarded_dict_ids = set()
+        for source_name in self.check_fn_manager.output_graph.guard_on_key_order:
+            self.key_order_guarded_dict_ids.add(id(self.get(source_name)))
+
         # Keep track of weak references of objects with ID_MATCH guard. This
         # info is stored alongside optimized_code and check_fn and is used to
         # limit the number of cache entries with same ID_MATCH'd object.
         self.id_matched_objs: Dict[str, ReferenceType[object]] = {}
 
-    def add_dict_keys_guard(self, value, guard):
+        # Save the guard managers to avoid repeatedly traversing sources.
+        self._cached_guard_managers: Dict[
+            str, torch._C._dynamo.guards.GuardManager
+        ] = {}
+
+        self._cached_duplicate_input_guards: Set[Tuple[str, str]] = set()
+
+    def guard_on_dict_keys_and_ignore_order(self, example_value, guard):
+        dict_mgr = self.get_guard_manager(guard)
+        if isinstance(dict_mgr, DictGuardManager):
+            raise NotImplementedError(
+                "Not expecting a DictGuardManager. Seems like Dynamo incorrectly "
+                f"added the dict to tx.output.guard_on_key_order for {guard.name}"
+            )
+
+        # Iterate over the dicts and install a dict_getitem_manager.
+        dict_source = guard.originating_source.name()
+        for key in example_value.keys():
+            value = example_value[key]
+            value_source = GetItemSource(guard.originating_source, index=key)
+            guard_manager_enum = self.get_guard_manager_type(
+                value_source, example_value
+            )
+            dict_mgr.dict_getitem_manager(
+                key=key,
+                source=f"{dict_source}[{key!r}]",
+                example_value=value,
+                guard_manager_enum=guard_manager_enum,
+            )
+
+    def guard_on_dict_keys_and_order(self, value, guard):
         # Add key managers for the DictGuardManager. Then add either an
         # ID_MATCH or EQUALS_MATCH guard on the key.
         dict_mgr = self.get_guard_manager(guard)
+        if not isinstance(dict_mgr, DictGuardManager):
+            raise NotImplementedError(
+                "Expecting a DictGuardManager. Seems like Dynamo forgot "
+                f"to set the right guard manager enum for {guard.name}"
+            )
         assert isinstance(dict_mgr, DictGuardManager)
+
         for idx, key in enumerate(value.keys()):
-            key_source = guard.name + f".keys()[{idx}]"
+            key_source = get_key_index_source(guard.name, idx)
             key_manager = dict_mgr.get_key_manager(
-                index=idx, source=key_source, example_value=key
+                index=idx,
+                source=key_source,
+                example_value=key,
+                guard_manager_enum=GuardManagerType.GUARD_MANAGER,
             )
             if key_is_id(key):
                 # Install ID_MATCH guard
@@ -468,13 +646,190 @@ class GuardBuilder(GuardBuilderBase):
             else:
                 # Install EQUALS_MATCH guard
                 key_manager.add_equals_match_guard(
-                    key, get_verbose_code_parts(f"{key_source} == {key}", guard)
+                    key, get_verbose_code_parts(f"{key_source} == {key!r}", guard)
                 )
+
+    def getattr_on_nn_module(
+        self,
+        source,
+        base_guard_manager,
+        base_example_value,
+        example_value,
+        base_source_name,
+        source_name,
+        guard_manager_enum,
+    ):
+        """
+        This tries to avoid calling the expensive nn module custom getattr method by
+        checking if the attribute is accessible via __dict__. For attributes that
+        are not accessible via __dict__ (like descriptors), we fallback to
+        PyObject_GetAttr.
+
+        There are two cases that we optimize for
+        1) attributes present directly in __dict__, e.g training.
+        2) parameters/buffers/modules - they can be accessed via _parameters,
+        _buffers, _modules keys in __dict__. For example, mod.linear can be
+        accessed as mod.__dict__["_parameters"]["linear"]
+
+        The most common and expensive case for nn module guards is of type
+        mod.submod1.submod2.submod3.training. We avoid the python getattr of nn
+        modules by going through the __dict__.
+        """
+
+        def getitem_on_dict_mgr(
+            mgr, key, source_name, base_example_value, example_value, guard_manager_enum
+        ):
+            if isinstance(mgr, DictGuardManager):
+                # Case where the user code relies on key order, e.g.,
+                # named_parameters
+                index = get_key_index(base_example_value, key)
+
+                # Install the key manager and add equals match guard
+                key_source = f"list({source_name}.keys())[{index!r}]"
+                mgr.get_key_manager(
+                    index=index,
+                    source=key_source,
+                    example_value=key,
+                    guard_manager_enum=GuardManagerType.GUARD_MANAGER,
+                ).add_equals_match_guard(key, [f"{key_source} == {key!r}"])
+
+                # Install the value manager
+                return mgr.get_value_manager(
+                    index=index,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
+            else:
+                return mgr.dict_getitem_manager(
+                    key=key,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
+
+        attr_name = source.member
+        mod_dict = base_example_value.__dict__
+
+        all_class_attribute_names: Set[str] = set()
+        for x in inspect.getmro(base_example_value.__class__):
+            all_class_attribute_names.update(x.__dict__.keys())
+
+        accessor_info = NNModuleAttrAccessorInfo(False, None, None)
+
+        if attr_name in mod_dict:
+            accessor_info = NNModuleAttrAccessorInfo(True, attr_name, None)
+        elif "_parameters" in mod_dict and attr_name in mod_dict["_parameters"]:
+            accessor_info = NNModuleAttrAccessorInfo(True, "_parameters", attr_name)
+        elif "_buffers" in mod_dict and attr_name in mod_dict["_buffers"]:
+            accessor_info = NNModuleAttrAccessorInfo(True, "_buffers", attr_name)
+        elif (
+            attr_name not in all_class_attribute_names
+            and "_modules" in mod_dict
+            and attr_name in mod_dict["_modules"]
+        ):
+            # Check test_attr_precedence test - instance attributes always take precedence unless its an nn.Module.
+            accessor_info = NNModuleAttrAccessorInfo(True, "_modules", attr_name)
+
+        if not accessor_info.present_in_generic_dict:
+            # The attribute can be accessed by __getattribute__ call, so rely on
+            # PyObject_GetAttr
+            return base_guard_manager.getattr_manager(
+                attr=source.member,
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        else:
+            assert accessor_info.l1_key
+            l1_key = accessor_info.l1_key
+            l2_key = accessor_info.l2_key
+
+            # Set source strings for debug info
+            mod_dict_source = f"{base_source_name}.__dict__"
+            l1_source_name = l2_source_name = None
+            l1_value = l2_value = None
+            l1_guard_manager_enum = l2_guard_manager_enum = None
+            if l2_key:
+                l1_source = AttrSource(source.base, l1_key)
+                l1_source_name = l1_source.name()
+                l1_value = mod_dict[l1_key]
+                # do not guard on key order for _parameters etc unless the user code
+                # actually needs the key order (e.g. calling named_parameters)
+                l1_guard_manager_enum = self.get_guard_manager_type(l1_source, l1_value)
+
+                l2_source_name = source_name
+                l2_value = example_value
+                l2_guard_manager_enum = self.get_guard_manager_type(
+                    source, example_value
+                )
+            else:
+                l1_source_name = source_name
+                l1_value = example_value
+                l1_guard_manager_enum = self.get_guard_manager_type(
+                    source, example_value
+                )
+
+            # Get __dict__ accessor. No need to guard on dict key order, so use base
+            # Guard Manager
+            mod_generic_dict_manager = base_guard_manager.get_generic_dict_manager(
+                source=mod_dict_source,
+                example_value=mod_dict,
+                guard_manager_enum=GuardManagerType.GUARD_MANAGER,
+            )
+
+            l1_mgr = getitem_on_dict_mgr(
+                mgr=mod_generic_dict_manager,
+                key=l1_key,
+                source_name=l1_source_name,
+                base_example_value=mod_dict,
+                example_value=l1_value,
+                guard_manager_enum=l1_guard_manager_enum,
+            )
+
+            if l2_key:
+                return getitem_on_dict_mgr(
+                    mgr=l1_mgr,
+                    key=l2_key,
+                    source_name=l2_source_name,
+                    base_example_value=l1_value,
+                    example_value=l2_value,
+                    guard_manager_enum=l2_guard_manager_enum,
+                )
+            return l1_mgr
+
+    def requires_key_order_guarding(self, source):
+        source_name = source.name()
+        if source_name == "":
+            return False
+        obj_id = id(self.get(source_name))
+        return obj_id in self.key_order_guarded_dict_ids
+
+    def get_guard_manager_type(self, source, example_value):
+        guard_manager_enum = GuardManagerType.GUARD_MANAGER
+        if self.requires_key_order_guarding(source):
+            assert isinstance(example_value, dict)
+            # If keys method is not overriden, we can use PyDict_Next to get key
+            # orderings. Read more in guards.cpp
+            if type(example_value).keys is type({}).keys:
+                guard_manager_enum = GuardManagerType.DICT_GUARD_MANAGER
+            else:
+                guard_manager_enum = GuardManagerType.DICT_SUBCLASS_GUARD_MANAGER
+        return guard_manager_enum
+
+    def manager_guards_on_keys(self, mgr_enum):
+        return (
+            mgr_enum == GuardManagerType.DICT_GUARD_MANAGER
+            or mgr_enum == GuardManagerType.DICT_SUBCLASS_GUARD_MANAGER
+        )
 
     def get_global_guard_manager(self):
         assert self.guard_manager  # to make mypy happy
         return self.guard_manager.root.globals_dict_manager(
-            f_globals=self.scope["G"], source="G", example_value=None
+            f_globals=self.scope["G"],
+            source="G",
+            example_value=self.scope["G"],
+            guard_manager_enum=GuardManagerType.GUARD_MANAGER,
         )
 
     def get_guard_manager_from_source(self, source):
@@ -483,42 +838,55 @@ class GuardBuilder(GuardBuilderBase):
 
         example_value = None
         source_name = source.name()
+
+        if source_name != "" and source_name in self._cached_guard_managers:
+            return self._cached_guard_managers[source_name]
+
         if source_name != "":
             example_value = self.get(source_name)
+
+        guard_manager_enum = self.get_guard_manager_type(source, example_value)
 
         # Get base manager related information
         base_source_name = None
         base_example_value = None
         base_guard_manager = None
+        base_guard_manager_enum = GuardManagerType.GUARD_MANAGER
         if isinstance(source, ChainedSource):
             base_source_name = source.base.name()
             base_example_value = self.get(base_source_name)
             base_guard_manager = self.get_guard_manager_from_source(source.base)
+            base_guard_manager_enum = self.get_guard_manager_type(
+                source.base, base_example_value
+            )
 
         # Use istype instead of isinstance to check for exact type of source.
         if istype(source, LocalSource):
             # RootGuardManager accepts a dict but still its not a
             # DictGuardManager because we will eventually move to
             # fastlocals.
-            return root_guard_manager.dict_getitem_manager(
+            out = root_guard_manager.dict_getitem_manager(
                 key=source.local_name,
                 source=source_name,
                 example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif istype(source, GlobalSource):
             # Global manager accepts a dict but it is not a DictGuardManager
             # because globals dict is big and we typically guard on a very
             # selected items on globals.
-            return self.get_global_guard_manager().dict_getitem_manager(
+            out = self.get_global_guard_manager().dict_getitem_manager(
                 key=source.global_name,
                 source=source_name,
                 example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif istype(source, GlobalWeakRefSource):
-            return self.get_global_guard_manager().global_weakref_manager(
+            out = self.get_global_guard_manager().global_weakref_manager(
                 global_name=source.global_name,
                 source=source_name,
                 example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif istype(source, GlobalStateSource):
             # Don't do anything here. We guard on global state completely in
@@ -528,131 +896,246 @@ class GuardBuilder(GuardBuilderBase):
             return root_guard_manager
         elif istype(source, TypeSource):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager.type_manager(
-                source=source_name, example_value=example_value
+            out = base_guard_manager.type_manager(
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif istype(
             source,
-            (OptimizerSource, NNModuleSource, NotNNModuleSource, FSDPNNModuleSource),
+            (
+                OptimizerSource,
+                NNModuleSource,
+                UnspecializedNNModuleSource,
+                UnspecializedBuiltinNNModuleSource,
+                FSDPNNModuleSource,
+            ),
         ):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager
+            out = base_guard_manager
+        elif istype(source, TorchFunctionModeStackSource):
+            out = root_guard_manager.lambda_manager(
+                python_lambda=lambda _: get_torch_function_mode_stack_at(
+                    source._get_index()
+                ),
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
         elif istype(source, GradSource):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager.grad_manager(
-                source=source_name, example_value=example_value
+            out = base_guard_manager.grad_manager(
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
-        elif istype(source, AttrSource):
+        elif istype(source, (AttrSource, UnspecializedParamBufferSource)):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager.getattr_manager(
-                attr=source.member, source=source_name, example_value=example_value
-            )
-        elif istype(source, GetItemSource):
-            assert base_guard_manager  # to make mypy happy
-            if isinstance(base_guard_manager, DictGuardManager):
-                # TODO(anijain2305) - Consider isolating GetItemSource and
-                # DictGetItemSource (or maybe use ODictGetItemSource for
-                # dicts) so that GetItemSource is only for non dict objects.
-                return getitem_on_dict_manager(
+
+            if (
+                isinstance(base_example_value, torch.nn.Module)
+                and get_custom_getattr(base_example_value)
+                is unpatched_nn_module_getattr
+            ):
+                out = self.getattr_on_nn_module(
                     source,
                     base_guard_manager,
                     base_example_value,
                     example_value,
+                    base_source_name,
+                    source_name,
+                    guard_manager_enum,
                 )
-
-            # TODO(anijain2305) - Ideally we should have an assert here that
-            # base_example_value should not be a dict subclass. It should be
-            # a dict manager and should already be handled. Infact PyTorch
-            # CI is happy with that assert. But lets wait for a few weeks
-            # with some more testing on real models before turning this into
-            # an assertion.
+            else:
+                out = base_guard_manager.getattr_manager(
+                    attr=source.member,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
+        elif istype(source, GetItemSource):
+            assert base_guard_manager  # to make mypy happy
             if isinstance(base_example_value, (dict, collections.OrderedDict)):
-                guards_log.debug(
-                    "%s",
-                    (
-                        f"Using a generic GuardManager instead of DictGuardManager for {source_name}."
-                        " Could give a small perf improvement in guard eval with DictGuardManager.",
-                    ),
-                )
-                return base_guard_manager.dict_getitem_manager(
+                # TODO(anijain2305) - Consider isolating GetItemSource and
+                # DictGetItemSource (or maybe use ODictGetItemSource for
+                # dicts) so that GetItemSource is only for non dict objects.
+                if isinstance(base_guard_manager, DictGuardManager):
+                    assert self.manager_guards_on_keys(base_guard_manager_enum)
+                    out = getitem_on_dict_manager(
+                        source,
+                        base_guard_manager,
+                        base_example_value,
+                        example_value,
+                        guard_manager_enum,
+                    )
+                else:
+                    if isinstance(source.index, ConstDictKeySource):
+                        raise RuntimeError(
+                            "Expecting clean index here. Likely Dynamo forgot to mark"
+                            " a dict as guard_on_key_order"
+                        )
+                    out = base_guard_manager.dict_getitem_manager(
+                        key=source.index,
+                        source=source_name,
+                        example_value=example_value,
+                        guard_manager_enum=guard_manager_enum,
+                    )
+            elif isinstance(base_example_value, list) and not source.index_is_slice:
+                out = base_guard_manager.list_getitem_manager(
                     key=source.index,
                     source=source_name,
                     example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
                 )
-            index = source.index
-            if source.index_is_slice:
-                index = source.unpack_slice()
-            return base_guard_manager.getitem_manager(
-                key=index, source=source_name, example_value=example_value
-            )
+            elif isinstance(base_example_value, tuple) and not source.index_is_slice:
+                out = base_guard_manager.tuple_getitem_manager(
+                    key=source.index,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
+            else:
+                index = source.index
+                if source.index_is_slice:
+                    index = source.unpack_slice()
+                out = base_guard_manager.getitem_manager(
+                    key=index,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
         elif istype(source, ODictGetItemSource):
-            assert isinstance(base_guard_manager, DictGuardManager)
-            return getitem_on_dict_manager(
-                source,
-                base_guard_manager,
-                base_example_value,
-                example_value,
-            )
+            if isinstance(base_guard_manager, DictGuardManager):
+                assert self.manager_guards_on_keys(base_guard_manager_enum)
+                out = getitem_on_dict_manager(
+                    source,
+                    base_guard_manager,
+                    base_example_value,
+                    example_value,
+                    guard_manager_enum,
+                )
+            else:
+                assert base_guard_manager  # to make mypy happy
+                out = base_guard_manager.dict_getitem_manager(
+                    key=source.index,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
+                )
         elif istype(source, DefaultsSource):
             assert base_guard_manager  # to make mypy happy
             assert callable(base_example_value)
             if not source.is_kw:
-                return base_guard_manager.func_defaults_manager(
+                out = base_guard_manager.func_defaults_manager(
                     source=base_source_name,
                     example_value=base_example_value.__defaults__,
+                    guard_manager_enum=GuardManagerType.GUARD_MANAGER,
                 ).getitem_manager(
                     key=source.idx_key,
                     source=source_name,
                     example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
                 )
             else:
                 # kwdefauts is a dict, so use a DictGuardManager
                 kwdefaults = base_example_value.__kwdefaults__
                 assert base_source_name is not None
                 kw_source = base_source_name + ".__kwdefaults__"
+
+                # kwdefaults is a dict. No need to guard on dict order.
                 dict_mgr = base_guard_manager.func_kwdefaults_manager(
                     source=kw_source,
                     example_value=kwdefaults,
+                    guard_manager_enum=GuardManagerType.GUARD_MANAGER,
                 )
-                assert isinstance(dict_mgr, DictGuardManager)
-                index = get_key_index(kwdefaults, source.idx_key)
-                key_source = get_key_index_source(kw_source, index)
+                assert not isinstance(dict_mgr, DictGuardManager)
 
-                # Add key manager and equals match guard
-                dict_mgr.get_key_manager(
-                    index=index, source=key_source, example_value=source.idx_key
-                ).add_equals_match_guard(
-                    source.idx_key, [f"{key_source} == {source.idx_key}"]
-                )
-
-                # Add value manager and return it
-                return dict_mgr.get_value_manager(
-                    index=index, source=source_name, example_value=example_value
+                out = dict_mgr.dict_getitem_manager(
+                    key=source.idx_key,
+                    source=source_name,
+                    example_value=example_value,
+                    guard_manager_enum=guard_manager_enum,
                 )
         elif istype(source, NumpyTensorSource):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager.lambda_manager(
+            out = base_guard_manager.lambda_manager(
                 python_lambda=from_numpy,
                 source=source_name,
                 example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, SubclassAttrListSource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.lambda_manager(
+                python_lambda=lambda x: x.__tensor_flatten__()[0],
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, FlattenScriptObjectSource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.lambda_manager(
+                python_lambda=lambda x: x.__obj_flatten__(),
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, ScriptObjectQualifiedNameSource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.lambda_manager(
+                python_lambda=lambda x: x._type().qualified_name(),
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, AttrProxySource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.lambda_manager(
+                python_lambda=lambda x: x.get_base(),
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif istype(source, TupleIteratorGetItemSource):
             assert base_guard_manager  # to make mypy happy
-            return base_guard_manager.tuple_iterator_getitem_manager(
-                index=source.index, source=source_name, example_value=example_value
+            out = base_guard_manager.tuple_iterator_getitem_manager(
+                index=source.index,
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         elif isinstance(source, ConstDictKeySource):
             if not isinstance(base_guard_manager, DictGuardManager):
                 raise AssertionError(
                     "ConstDictKeySource can only work on DictGuardManager"
                 )
-            return base_guard_manager.get_key_manager(
-                index=source.index, source=source_name, example_value=example_value
+            out = base_guard_manager.get_key_manager(
+                index=source.index,
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, WeakRefCallSource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.weakref_call_manager(
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
+            )
+        elif istype(source, CallFunctionNoArgsSource):
+            assert base_guard_manager  # to make mypy happy
+            out = base_guard_manager.call_function_no_args_manager(
+                source=source_name,
+                example_value=example_value,
+                guard_manager_enum=guard_manager_enum,
             )
         else:
             raise AssertionError(
                 f"missing guard manager builder {source} - {source.name()}"
             )
+
+        self._cached_guard_managers[source.name()] = out
+        return out
 
     def get_guard_manager(self, guard: Guard):
         return self.get_guard_manager_from_source(guard.originating_source)
@@ -661,15 +1144,17 @@ class GuardBuilder(GuardBuilderBase):
         self,
         code_parts,
         verbose_code_parts,
-        closure_vars=CLOSURE_VARS,
+        closure_vars=None,
         is_epilogue=True,
     ):
+        if closure_vars is None:
+            closure_vars = _get_closure_vars()
         # Adds a lambda leaf guard to the root guard manager. It wraps the
         # code_parts in a function object which is then passed on to the leaf
         # guard.
         make_guard_fn_args = ", ".join(closure_vars.keys())
         guard_body, pycode = build_guard_function(code_parts, make_guard_fn_args)
-        out: Dict[str, Any] = dict()
+        out: Dict[str, Any] = {}
         globals_for_guard_fn = {"G": self.scope["G"]}
         exec(pycode, globals_for_guard_fn, out)
         guard_fn = out["___make_guard_fn"](*closure_vars.values())
@@ -691,7 +1176,7 @@ class GuardBuilder(GuardBuilderBase):
     # (like its type) which is what you permanently install into the
     # guard code.
     def get(self, name: str) -> Any:
-        return eval(name, self.scope, CLOSURE_VARS)
+        return eval(name, self.scope, _get_closure_vars())
 
     # Registers the usage of the source name referenced by the
     # string (or stored in the Guard) as being guarded upon.  It's important
@@ -748,15 +1233,58 @@ class GuardBuilder(GuardBuilderBase):
                 # Just install a getattr manager. GetAttrGuardAccessor itself
                 # acts as hasattr guard.
                 example_value = self.get(source.name())
-                base_manager.getattr_manager(
-                    attr=attr, source=guard.name, example_value=example_value
-                )
+                base_example_value = self.get(base)
+                guard_manager_enum = self.get_guard_manager_type(source, example_value)
+
+                # if the base value is nn.Module, check if we can speedup the
+                # guard by going through __dict__ attrs.
+                if (
+                    isinstance(base_example_value, torch.nn.Module)
+                    and get_custom_getattr(base_example_value)
+                    is unpatched_nn_module_getattr
+                ):
+                    return self.getattr_on_nn_module(
+                        source,
+                        base_manager,
+                        base_example_value,
+                        example_value,
+                        base,
+                        source.name(),
+                        guard_manager_enum,
+                    )
+                else:
+                    base_manager.getattr_manager(
+                        attr=attr,
+                        source=guard.name,
+                        example_value=example_value,
+                        guard_manager_enum=guard_manager_enum,
+                    )
             else:
                 base_manager.add_no_hasattr_guard(
                     attr, get_verbose_code_parts(code, guard)
                 )
         else:
             self._produce_guard_code(guard, [code])
+
+    def NOT_PRESENT_IN_GENERIC_DICT(self, guard: Guard, attr=None) -> None:
+        assert attr is not None
+        ref = self.arg_ref(guard)
+        val = self.get(guard.name)
+        assert isinstance(val, torch.nn.Module)
+
+        base_manager = self.get_guard_manager(guard)
+
+        mod_dict_source = f"{guard.name}.__dict__"
+        mod_generic_dict_manager = base_manager.get_generic_dict_manager(
+            source=mod_dict_source,
+            example_value=val.__dict__,
+            guard_manager_enum=GuardManagerType.GUARD_MANAGER,
+        )
+
+        code = f"not ___dict_contains({attr!r}, {ref}.__dict__)"
+        mod_generic_dict_manager.add_dict_contains_guard(
+            False, attr, get_verbose_code_parts(code, guard)
+        )
 
     def TYPE_MATCH(self, guard: Guard) -> None:
         # ___check_type_id is same as `id(type(x)) == y`
@@ -800,33 +1328,6 @@ class GuardBuilder(GuardBuilderBase):
             self.get_guard_manager(guard).add_dict_contains_guard(
                 not invert, key, get_verbose_code_parts(code, guard)
             )
-        else:
-            self._produce_guard_code(guard, [code])
-
-    def BOOL_FALSE(self, guard: Guard):
-        # Guard on the runtime value being 'False',
-        # can be faster than seemingly equivalent checks like DICT_KEYS for empty dict
-        #
-        # WARNING: this guard is not safe to use generally.  It only works if the runtime
-        # value is of a type that supports bool(), and some types e.g. Tensor do not.
-        # Only use this guard in cases you can guarantee the runtime type will be friendly.
-        # (e.g. Specialized NNModule with mutation protection via setattr)
-        #
-        # Why not simply check the runtime type inside this guard?  It's slow enough to defeat
-        # the purpose of using this guard, which itself is supposed to be a faster alternative
-        # to DICT_KEYS.
-        ref = self.arg_ref(guard)
-        code = f"not {ref}"
-        self._set_guard_export_info(guard, [code])
-
-        if config.enable_cpp_guard_manager:
-            # BOOL_FALSE is a weird guard. It is used to effectively check
-            # len(dict) == 0. Since it is used only and only for dicts, we don't
-            # have to anything here. DictGuardManager internally stores the size
-            # of the dict, and checks its size on every invocation. PyDict_Size
-            # is very fast, so we don't need BOOL_FALSE optimization. Just
-            # construct the dict guard manager to install a DictGuardManager.
-            self.get_guard_manager(guard)
         else:
             self._produce_guard_code(guard, [code])
 
@@ -939,6 +1440,33 @@ class GuardBuilder(GuardBuilderBase):
         else:
             self._produce_guard_code(guard, code)
 
+    def TENSOR_SUBCLASS_METADATA_MATCH(self, guard: Guard):
+        value = self.get(guard.name)
+        original_metadata = deepcopy(self.get(guard.name).__tensor_flatten__()[1])
+        if hasattr(value, "__metadata_guard__"):
+            verify_guard_fn_signature(value)
+
+            def metadata_checker(x):
+                return value.__metadata_guard__(
+                    original_metadata, x.__tensor_flatten__()[1]
+                )
+
+        else:
+
+            def metadata_checker(x):
+                return x.__tensor_flatten__()[1] == original_metadata
+
+        global_name = f"___check_metadata_{id(metadata_checker)}_c{CompileContext.current_compile_id()}"
+        if config.enable_cpp_guard_manager:
+            self.get_guard_manager(guard).add_lambda_guard(
+                metadata_checker, get_verbose_code_parts(global_name, guard)
+            )
+        else:
+            global_scope = self.get("G")
+            global_scope[global_name] = metadata_checker
+            code = [f"{global_name}({self.get(guard.name)})"]
+            self._produce_guard_code(guard, code)
+
     def EQUALS_MATCH(self, guard: Guard):
         ref = self.arg_ref(guard)
         val = self.get(guard.name)
@@ -959,20 +1487,38 @@ class GuardBuilder(GuardBuilderBase):
             )
         else:
             np_types = ()
+
+        ok_mutable_types = (list, set)
+
         ok_types = tuple(
             common_constant_types
             | {
                 type,
-                list,
                 tuple,
-                set,
                 frozenset,
                 slice,
                 range,
                 torch.Size,
                 *np_types,
+                *ok_mutable_types,
             }
         )
+
+        if torch.distributed.is_available():
+            from torch.distributed.device_mesh import DeviceMesh
+            from torch.distributed.tensor.placement_types import (
+                Partial,
+                Replicate,
+                Shard,
+            )
+
+            ok_types = ok_types + (
+                Shard,
+                Replicate,
+                Partial,
+                DeviceMesh,
+            )
+
         if istype(val, dict):
             assert all(
                 istype(x, ok_types) for x in itertools.chain(val.keys(), val.values())
@@ -986,13 +1532,14 @@ class GuardBuilder(GuardBuilderBase):
         # Special case for nan because float("nan") == float("nan") evaluates to False
         if istype(val, float) and math.isnan(val):
             self.TYPE_MATCH(guard)
-            code = list()
+            code = []
             code.append(f"__math_isnan({ref})")
             self._set_guard_export_info(guard, code)
 
             if config.enable_cpp_guard_manager:
                 self.get_guard_manager(guard).add_lambda_guard(
-                    CLOSURE_VARS["__math_isnan"], get_verbose_code_parts(code, guard)
+                    _get_closure_vars()["__math_isnan"],
+                    get_verbose_code_parts(code, guard),
                 )
             else:
                 self._produce_guard_code(guard, code)
@@ -1001,13 +1548,14 @@ class GuardBuilder(GuardBuilderBase):
         # Python math library doesn't support complex nan, so we need to use numpy
         if istype(val, complex) and np.isnan(val):
             self.TYPE_MATCH(guard)
-            code = list()
+            code = []
             code.append(f"__numpy_isnan({ref})")
             self._set_guard_export_info(guard, code)
 
             if config.enable_cpp_guard_manager:
                 self.get_guard_manager(guard).add_lambda_guard(
-                    CLOSURE_VARS["__numpy_isnan"], get_verbose_code_parts(code, guard)
+                    _get_closure_vars()["__numpy_isnan"],
+                    get_verbose_code_parts(code, guard),
                 )
             else:
                 self._produce_guard_code(guard, code)
@@ -1016,13 +1564,18 @@ class GuardBuilder(GuardBuilderBase):
         if config.enable_cpp_guard_manager:
             # Construct a debug string to put into the c++ equals match guard.
             code = [f"{ref} == {val!r}"]
+            if istype(val, ok_mutable_types):
+                # C++ guards perform a pointer equality check to speedup guards, but the assumption is that the object
+                # is mutable. For a few corner cases like sets and lists, we make a deepcopy to purposefully fail the
+                # pointer equality check.
+                val = deepcopy(val)
             self.get_guard_manager(guard).add_equals_match_guard(
                 val, get_verbose_code_parts(code, guard)
             )
             self._set_guard_export_info(guard, code)
             return
 
-        code = list()
+        code = []
 
         # If matching equality against list/tuple, we must also check that
         # the internal types match.  (TODO: what about nested lists?)
@@ -1061,34 +1614,26 @@ class GuardBuilder(GuardBuilderBase):
 
     def NN_MODULE(self, guard: Guard):
         self.ID_MATCH(guard)
-        ref = self.arg_ref(guard)
         val = self.get(guard.name)
-
-        def setup_guard():
+        if hasattr(val, "training"):
             assert istype(val.training, bool)
             self._guard_on_attribute(guard, "training", GuardBuilder.CONSTANT_MATCH)
-
-        if hasattr(val, "training"):
-            # There are cases where a monkeypatched object has a guard made between __new__ and __init__
-            setup_guard()
         else:
             exc.unimplemented(f"Guard setup for uninitialized class {type(val)}")
 
     def FUNCTION_MATCH(self, guard: Guard):
         """things like torch.add and user defined functions"""
-        if guard.is_local():
-            return self.ID_MATCH(guard)
+        return self.ID_MATCH(guard)
 
     def CLOSURE_MATCH(self, guard: Guard):
         """matches a closure by __code__ id."""
-        if guard.is_local():
-            val = self.get(guard.name)
-            # Strictly only want user-defined functions
-            if type(val) == types.FunctionType and hasattr(val, "__code__"):
-                self._guard_on_attribute(guard, "__code__", GuardBuilder.HASATTR)
-                self._guard_on_attribute(guard, "__code__", GuardBuilder.FUNCTION_MATCH)
-            else:
-                self.FUNCTION_MATCH(guard)
+        val = self.get(guard.name)
+        # Strictly only want user-defined functions
+        if type(val) == types.FunctionType and hasattr(val, "__code__"):
+            self._guard_on_attribute(guard, "__code__", GuardBuilder.HASATTR)
+            self._guard_on_attribute(guard, "__code__", GuardBuilder.FUNCTION_MATCH)
+        else:
+            self.FUNCTION_MATCH(guard)
 
     def BUILTIN_MATCH(self, guard: Guard):
         return self.FUNCTION_MATCH(guard)
@@ -1103,8 +1648,11 @@ class GuardBuilder(GuardBuilderBase):
         value = self.get(guard.name)
         t = type(value)
 
-        self.TYPE_MATCH(guard)
-        code = list()
+        if not (config.enable_cpp_guard_manager and isinstance(value, dict)):
+            # C++ DICT_LENGTH checks for type
+            self.TYPE_MATCH(guard)
+
+        code = []
         if len(value) == 0:
             code.append(f"not {ref}")
         else:
@@ -1112,14 +1660,16 @@ class GuardBuilder(GuardBuilderBase):
 
         self._set_guard_export_info(guard, code)
         if config.enable_cpp_guard_manager:
-            self.get_guard_manager(guard).add_length_check_guard(
-                len(value), get_verbose_code_parts(code, guard)
-            )
+            if isinstance(value, dict):
+                self.get_guard_manager(guard).add_dict_length_check_guard(
+                    len(value), get_verbose_code_parts(code, guard)
+                )
+            else:
+                self.get_guard_manager(guard).add_length_check_guard(
+                    len(value), get_verbose_code_parts(code, guard)
+                )
         else:
             self._produce_guard_code(guard, code)
-
-    def DICT_LENGTH(self, guard):
-        self.SEQUENCE_LENGTH(guard)
 
     def TUPLE_ITERATOR_LEN(self, guard):
         ref = self.arg_ref(guard)
@@ -1130,7 +1680,7 @@ class GuardBuilder(GuardBuilderBase):
             # C++ guard already checks the type
             self.TYPE_MATCH(guard)
 
-        code = list()
+        code = []
         code.append(f"___tuple_iterator_len({ref}) == {tuple_iterator_len(value)}")
         self._set_guard_export_info(guard, code)
 
@@ -1158,7 +1708,14 @@ class GuardBuilder(GuardBuilderBase):
         self._set_guard_export_info(guard, code)
 
         if config.enable_cpp_guard_manager:
-            install_tensor_aliasing_guard(
+            # Check that the guard has not been inserted already
+            key = (ref_a, ref_b)
+            if key in self._cached_duplicate_input_guards:
+                return
+            self._cached_duplicate_input_guards.add((ref_a, ref_b))
+            self._cached_duplicate_input_guards.add((ref_b, ref_a))
+
+            install_object_aliasing_guard(
                 self.get_guard_manager(guard),
                 self.get_guard_manager_from_source(source_b),
                 get_verbose_code_parts(code, guard),
@@ -1173,7 +1730,7 @@ class GuardBuilder(GuardBuilderBase):
         t = type(value)
 
         self.TYPE_MATCH(guard)
-        code = list()
+        code = []
         any_key_is_id = any(key_is_id(k) for k in value.keys())
         const_keys_repr = dict_keys_repr(
             key_to_id(value),
@@ -1186,7 +1743,10 @@ class GuardBuilder(GuardBuilderBase):
 
         self._set_guard_export_info(guard, code)
         if config.enable_cpp_guard_manager:
-            self.add_dict_keys_guard(value, guard)
+            if self.requires_key_order_guarding(guard.originating_source):
+                self.guard_on_dict_keys_and_order(value, guard)
+            else:
+                self.guard_on_dict_keys_and_ignore_order(value, guard)
         else:
             self._produce_guard_code(guard, code)
 
@@ -1201,30 +1761,6 @@ class GuardBuilder(GuardBuilderBase):
         else:
             self._produce_guard_code(guard, code)
 
-    def NN_MODULE_PARAM_NAMES(self, guard):
-        ref = self.arg_ref(guard)
-        value = self.get(guard.name)
-        t = type(value)
-        keys = {k for k, v in value.named_parameters()}
-
-        self.TYPE_MATCH(guard)
-        code = list()
-        code.append(f"{{k for k, v in {ref}.named_parameters()}} == {keys!r}")
-
-        self._set_guard_export_info(guard, code)
-        if config.enable_cpp_guard_manager:
-            # TODO(anijain2305) - Consider moving this guard to C++. anijain2305
-            # tried but unable to come up with a testcase that installs this
-            # guard.
-            def fn(x):
-                return {k for k, v in x.named_parameters()} == keys
-
-            self.get_guard_manager(guard).add_lambda_guard(
-                fn, get_verbose_code_parts(code, guard)
-            )
-        else:
-            self._produce_guard_code(guard, code)
-
     def DICT_CONST_KEYS(self, guard):
         """Constant keys match"""
         ref = self.arg_ref(guard)
@@ -1235,14 +1771,24 @@ class GuardBuilder(GuardBuilderBase):
             # DictGuardManager supports TYPE_MATCH internally
             self.TYPE_MATCH(guard)
 
-        code = list()
+        code = []
         code.append(f"list({ref}.keys()) == {list(value.keys())!r}")
         self._set_guard_export_info(guard, code)
 
         if config.enable_cpp_guard_manager:
-            self.add_dict_keys_guard(value, guard)
+            if self.requires_key_order_guarding(guard.originating_source):
+                self.guard_on_dict_keys_and_order(value, guard)
+            else:
+                self.guard_on_dict_keys_and_ignore_order(value, guard)
         else:
             self._produce_guard_code(guard, code)
+
+    def EMPTY_NN_MODULE_HOOKS_DICT(self, guard):
+        """Special guard to skip guards on empty hooks. This is controlled by skip_nnmodule_hook_guards"""
+        if config.skip_nnmodule_hook_guards:
+            # This is unsafe if you add/remove a hook on nn module variable
+            return
+        self.SEQUENCE_LENGTH(guard)
 
     def OBJECT_MUTATION(self, guard: Guard):
         mutation_guard.watch(self.get(guard.name), self.check_fn_manager)
@@ -1254,6 +1800,9 @@ class GuardBuilder(GuardBuilderBase):
         pass  # we always guard on this via GlobalStateGuard()
 
     def TORCH_FUNCTION_STATE(self, guard: Guard):
+        pass  # we always guard on this via GlobalStateGuard()
+
+    def FSDP_TRAINING_STATE(self, guard: Guard):
         pass  # we always guard on this via GlobalStateGuard()
 
     def DEFAULT_DEVICE(self, guard: Guard):
@@ -1290,8 +1839,7 @@ class GuardBuilder(GuardBuilderBase):
             ]
 
         if output_graph.export_constraints:
-            from sympy import Symbol
-
+            names: Dict[str, Tuple[int, int]] = {}
             source_pairs: List[Tuple[Source, Source]] = []
             derived_equalities: List[  # type: ignore[type-arg]
                 Tuple[Source, Union[Source, Symbol], Callable]
@@ -1303,6 +1851,7 @@ class GuardBuilder(GuardBuilderBase):
                         constraint,
                         get_sources,
                         output_graph.shape_env,
+                        names,
                         source_pairs,
                         derived_equalities,
                         phantom_symbols,
@@ -1317,7 +1866,7 @@ class GuardBuilder(GuardBuilderBase):
             )
         else:
             equalities_inputs = None
-        guards = output_graph.shape_env.produce_guards(
+        code_parts, verbose_code_parts = output_graph.shape_env.produce_guards_verbose(
             [a.fake for a in fs],
             [a.source for a in fs],
             input_contexts=input_contexts,
@@ -1331,26 +1880,38 @@ class GuardBuilder(GuardBuilderBase):
         if not self.check_fn_manager.output_graph.export:
             output_graph.shape_env.freeze()
 
-        for shape_guard in guards:
-            self._set_guard_export_info(guard, [shape_guard])
+        for code in code_parts:
+            self._set_guard_export_info(guard, [code])
 
         if config.enable_cpp_guard_manager:
             # Install all the symbolic guards in one lambda guard. These are run
             # at the very end of the RootGuardManager via epilogue guards.
             # TODO(anijain2305,williamwen42) - Consider moving this to C++.
-            code_parts = guards
             self.add_python_lambda_leaf_guard_to_root(
                 code_parts,
-                get_verbose_code_parts(code_parts, guard),
-                closure_vars={**SYMPY_INTERP, **CLOSURE_VARS},
+                verbose_code_parts,
+                closure_vars={**SYMPY_INTERP, **_get_closure_vars()},
             )
         else:
-            for shape_guard in guards:
-                self._produce_guard_code(guard, [shape_guard], shape_env=True)
+            for code in code_parts:
+                self._produce_guard_code(guard, [code], shape_env=True)
 
     def TENSOR_MATCH(self, guard: Guard, value=None):
-        if guard.is_nn_module() or match_on_id_for_tensor(guard):
-            self.DATA_PTR_MATCH(guard)
+        # For FSDP modules, we can skip guards on nn module tensors because FSDP
+        # eager assumes that the params are unchanged once the model is wrapped.
+        if guard.is_fsdp_module():
+            return
+
+        # For tensors that are part of the Dynamo extracted Fx graph module, an
+        # ID_MATCH suffices. Once we turn on inline_inbuilt_nn_modules, these
+        # will be lifted as inputs and have a TENSOR_MATCH guard.
+        # For numpy tensors, always use TENSOR_MATCH because __from_numpy leads
+        # to a new tensor everytime and therefore id differs.
+        if (
+            guard.is_specialized_nn_module()
+            and not isinstance(guard.originating_source, NumpyTensorSource)
+        ) or match_on_id_for_tensor(guard):
+            self.ID_MATCH(guard)
         else:
             if isinstance(value, TensorWeakRef):
                 value = value()
@@ -1380,7 +1941,7 @@ class GuardBuilder(GuardBuilderBase):
             #
             # The list of tensor fields and calls we care about can be found in `terms` below.
             # TODO(voz): We are missing storage offset in all our tensor guards?
-            code: List[str] = list()
+            code: List[str] = []
             if self.check_fn_manager.output_graph.export:
                 self.TYPE_MATCH(guard)
                 terms = [
@@ -1457,7 +2018,7 @@ class GuardBuilder(GuardBuilderBase):
             #
             assert guard.source is not None
             static, reason = tensor_always_has_static_shape(
-                value, is_tensor=True, guard_source=guard.source
+                value, is_tensor=True, tensor_source=guard.originating_source
             )
 
             if not static:
@@ -1677,6 +2238,12 @@ class CheckFunctionManager:
         self.output_graph = output_graph
         w_builder = None
 
+        # NB: Until we trace device contexts, we need to use the stack recorded at the beginning of tracing
+        # in case a set default device call was made in the graph.
+        self.torch_function_mode_stack = (
+            output_graph.torch_function_mode_stack if output_graph else None
+        )
+
         def source_ref(source):
             guard_source = source.guard_source()
             if guard_source is GuardSource.CONSTANT:
@@ -1706,10 +2273,17 @@ class CheckFunctionManager:
         # Break retain cycle. See test_release_input_memory
         w_builder = weakref.ref(builder, cleanup_builder)
 
+        guard_on_nn_modules = config.guard_nn_modules and justknobs_check(
+            "pytorch/compiler:guard_nn_modules"
+        )
+
+        if not justknobs_check("pytorch/compiler:guard_nn_modules"):
+            log.warning("guard_nn_modules is turned off using justknobs killswitch")
+
         for guard in sorted(guards or [], key=Guard.sort_key):
             if (
-                not config.guard_nn_modules
-                and guard.is_nn_module()
+                not guard_on_nn_modules
+                and guard.is_specialized_nn_module()
                 # Default func args must be guarded on.
                 # TODO: we could make use of 'DefaultsSource' and offer a .guard.is_defaults() API
                 and "__defaults__" not in guard.name
@@ -1719,7 +2293,9 @@ class CheckFunctionManager:
                 continue
 
             guard.create(builder)
+
         self.check_fn = self.compile_check_fn(builder, guards, guard_fail_fn)
+
         # Keep track of weak references of objects with ID_MATCH guard. This
         # info is stored alongside optimized_code and check_fn and is used to
         # limit the number of cache entries with same ID_MATCH'd object.
@@ -1731,13 +2307,27 @@ class CheckFunctionManager:
         self.check_fn.id_matched_objs = builder.id_matched_objs
 
         if config.enable_cpp_guard_manager:
-            if guards_log.isEnabledFor(logging.DEBUG):
-                guards_log.debug("%s", self.guard_manager)
-                # print(self.guard_manager)
-            # breakpoint()
+            # TODO: don't do the string rep, do something more structured here
+            torch._logging.trace_structured(
+                "dynamo_cpp_guards_str", payload_fn=lambda: str(self.guard_manager)
+            )
+            guards_log.debug("%s", self.guard_manager)
             assert self.guard_manager  # to make mypy happy
             self.guard_manager.id_matched_objs = builder.id_matched_objs
             self.check_fn = self.guard_manager
+
+            # Check that the guard returns True. False means that we will always
+            # recompile.
+            # TODO(anijain2305, ydwu4) - Skipping export because of following test
+            # python -s test/dynamo/test_export.py -k test_export_with_symbool_inputs
+            if not output_graph.export:
+                if not self.guard_manager.check(output_graph.local_scope):
+                    reasons = get_guard_fail_reason_helper(
+                        self.guard_manager,  # type: ignore[arg-type]
+                        output_graph.local_scope,
+                        CompileContext.current_compile_id(),
+                    )
+                    raise AssertionError(f"Guard check failed: {reasons}")
 
         # NB - We have to very careful of cleaning up here. Because of the
         # invalidate function, we can create a weakref finalizer that keeps
@@ -1759,17 +2349,35 @@ class CheckFunctionManager:
 
         code_parts = []
         verbose_code_parts = []
-        structured_guard_fns = []
+        structured_guard_fns: list[Callable[[], dict[str, Any]]] = []
+
+        torch_function_mode_stack_check_fn = make_torch_function_mode_stack_guard(
+            self.torch_function_mode_stack
+        )
 
         if config.enable_cpp_guard_manager:
+            from .variables.torch_function import IGNORED_MODES
+
             # Insert the global_state guard
             assert self.guard_manager  # to make mypy happy
             self.guard_manager.root.add_global_state_guard(["___check_global_state()"])
+
+            self.guard_manager.root.add_torch_function_mode_stack_guard(
+                self.torch_function_mode_stack,
+                list(IGNORED_MODES),
+                ["___check_torch_function_mode_stack()"],
+            )
+            # Clear references to torch_function modes held in the list
+            self.torch_function_mode_stack = None
         else:
             # Don't report this guard, it's always the same, useless!
             global_guard = "___check_global_state()"
             code_parts.append(global_guard)
             verbose_code_parts.append(global_guard)
+
+            tf_mode_stack_guard = "___check_torch_function_mode_stack()"
+            code_parts.append(tf_mode_stack_guard)
+            verbose_code_parts.append(tf_mode_stack_guard)
 
         def add_code_part(code_part, guard, log_only=False):
             verbose_code_part = get_verbose_code_part(code_part, guard)
@@ -1885,7 +2493,7 @@ class CheckFunctionManager:
                 source_b = guard.input_source_b
                 code_part = f"{source_a.name()} is {source_b.name()}"
                 if config.enable_cpp_guard_manager:
-                    install_tensor_aliasing_guard(
+                    install_object_aliasing_guard(
                         builder.get_guard_manager_from_source(source_a),
                         builder.get_guard_manager_from_source(source_b),
                         [code_part],
@@ -1903,9 +2511,10 @@ class CheckFunctionManager:
                 add_code_part(code, gcl.guard, config.enable_cpp_guard_manager)
 
         # OK, all done generating guards
-        torch._logging.trace_structured(
-            "dynamo_guards", payload_fn=lambda: [f() for f in structured_guard_fns]
-        )
+        if structured_guard_fns:
+            torch._logging.trace_structured(
+                "dynamo_guards", payload_fn=lambda: [f() for f in structured_guard_fns]
+            )
 
         global_state = convert_frame.initial_global_state
         if global_state is None:
@@ -1915,9 +2524,10 @@ class CheckFunctionManager:
             "___check_tensors": check_tensors_fn,
             "___check_tensors_verbose": check_tensors_verbose_fn,
             "___check_global_state": global_state.check,
+            "___check_torch_function_mode_stack": torch_function_mode_stack_check_fn,
             "tensor_check_names": tensor_check_names,
             **SYMPY_INTERP,
-            **CLOSURE_VARS,
+            **_get_closure_vars(),
         }
 
         globals_for_guard_fn = {"G": builder.scope["G"]}
@@ -1940,7 +2550,7 @@ class CheckFunctionManager:
             if os.environ.get("TORCHDYNAMO_PRINT_GUARDS", None) == "1":
                 print("GUARDS\n", guard_body)
 
-            out: Dict[str, Any] = dict()
+            out: Dict[str, Any] = {}
 
             # We don't put builder.scope as the globals in exec call because
             # guard_fn.__globals__ becomes equal to builder.scope. This causes
@@ -1955,7 +2565,10 @@ class CheckFunctionManager:
         guard_fn.closure_vars = closure_vars
         # TODO(whc) maybe '.code_parts' was only kept around for the guard callback? so we don't need both
         guard_fn.args = largs
-        guard_fn.code_parts = code_parts
+        if config.enable_cpp_guard_manager:
+            guard_fn.populate_code_parts_for_debugging()
+        else:
+            guard_fn.code_parts = code_parts
         guard_fn.verbose_code_parts = verbose_code_parts
         # Grab only G, but preserve "G" because guards access it as "G"
         guard_fn.global_scope = globals_for_guard_fn
@@ -1964,6 +2577,7 @@ class CheckFunctionManager:
         # when the CacheEntry is constructed
         guard_fn.cache_entry = None
         guard_fn.extra_state = None
+        guard_fn.no_tensor_aliasing_sources = tensor_check_names
         return guard_fn
 
     def invalidate(self):
@@ -2054,10 +2668,50 @@ def is_recompiles_verbose_enabled():
     return torch._logging._internal.log_state.is_artifact_enabled("recompiles_verbose")
 
 
-def get_guard_fail_reason(
+# this will only be used if cpp guards are disabled
+def make_torch_function_mode_stack_guard(intial_stack):
+    types = [type(x) for x in intial_stack]
+    from .variables.torch_function import IGNORED_MODES
+
+    def check_torch_function_mode_stack():
+        cur_stack = get_torch_function_mode_stack()
+
+        types_ = [ty for ty in types if ty not in IGNORED_MODES]
+        cur_stack_ = [mode for mode in cur_stack if type(mode) not in IGNORED_MODES]
+
+        if len(cur_stack_) != len(types_):
+            return False
+
+        for ty, mode in zip(types_, cur_stack_):
+            if ty != type(mode):
+                return False
+
+        return True
+
+    return check_torch_function_mode_stack
+
+
+def recompilation_reason_for_no_tensor_aliasing_guard(guard_manager, scope):
+    duplicate_tensors = []
+    global_scope = dict(guard_manager.global_scope)
+    ids_to_source = collections.defaultdict(list)
+    for tensor_source in guard_manager.no_tensor_aliasing_sources:  # type: ignore[attr-defined]
+        global_scope["__compile_source__"] = tensor_source
+        tensor_id = id(eval(tensor_source, global_scope, scope))
+        ids_to_source[tensor_id].append(tensor_source)
+
+    for key in ids_to_source:
+        if len(ids_to_source[key]) > 1:
+            duplicate_tensors.append(f"{ids_to_source[key]}")
+
+    reason = ", ".join(duplicate_tensors)
+    return [f"Duplicate tensors found: {reason}"]
+
+
+def get_guard_fail_reason_helper(
     guard_fn: GuardFn,
-    code: types.CodeType,
     f_locals: Dict[str, object],
+    compile_id: CompileId,
 ) -> str:
     """
     Return the reason why `guard_fn` failed.
@@ -2067,6 +2721,8 @@ def get_guard_fail_reason(
     scope = {"L": f_locals, "G": guard_fn.global_scope["G"]}
     scope.update(guard_fn.closure_vars)
     reasons: List[str] = []
+
+    no_tensor_aliasing_check_failed = False
 
     verbose_code_parts: List[str] = []
     if config.enable_cpp_guard_manager:
@@ -2083,37 +2739,54 @@ def get_guard_fail_reason(
             # walk through this list and find the guard that failed. This is
             # very important for symbolic shape guards which are currently
             # installed as a lambda guard and can encompass a long list of code_parts.
+
             if len(verbose_code_parts) == 1:
-                reasons = verbose_code_parts
-                verbose_code_parts = []
+                if "Duplicate tensor found" in verbose_code_parts[0]:
+                    no_tensor_aliasing_check_failed = True
+                else:
+                    reasons = verbose_code_parts
+                    verbose_code_parts = []
     else:
         verbose_code_parts = guard_fn.verbose_code_parts
         # This is not needed for CPP guard because the verbose check is already
         # run in C++.
         scope["___check_tensors"] = scope["___check_tensors_verbose"]
 
-    for part in verbose_code_parts:
-        global_scope = dict(guard_fn.global_scope)
-        global_scope["__compile_source__"] = part
-        with report_compile_source_on_error():
-            try:
-                fail_reason = eval(part, global_scope, scope)
-            except Exception as e:
-                if is_recompiles_verbose_enabled():
-                    continue
-                else:
-                    raise
-        # Only ___check_tensors knows how to return a fancy fail reason;
-        # for everything else we just report the code that failed
+    if no_tensor_aliasing_check_failed:
+        reasons = recompilation_reason_for_no_tensor_aliasing_guard(guard_fn, scope)
+    else:
+        for part in verbose_code_parts:
+            global_scope = dict(guard_fn.global_scope)
+            global_scope["__compile_source__"] = part
+            with report_compile_source_on_error():
+                try:
+                    fail_reason = eval(part, global_scope, scope)
+                except Exception as e:
+                    if is_recompiles_verbose_enabled():
+                        continue
+                    else:
+                        raise
+            # Only ___check_tensors knows how to return a fancy fail reason;
+            # for everything else we just report the code that failed
 
-        if isinstance(fail_reason, bool) and not fail_reason:
-            fail_reason = part
-        if isinstance(fail_reason, str):
-            reasons.append(fail_reason)
-            if not is_recompiles_verbose_enabled():
-                break
+            if isinstance(fail_reason, bool) and not fail_reason:
+                fail_reason = part
+            if isinstance(fail_reason, str):
+                reasons.append(fail_reason)
+                if not is_recompiles_verbose_enabled():
+                    break
 
-    reason_str = "\n".join(reasons)
+    reason_str = f"{compile_id}: " + "; ".join(reasons)
+    return reason_str
+
+
+def get_guard_fail_reason(
+    guard_fn: GuardFn,
+    code: types.CodeType,
+    f_locals: Dict[str, object],
+    compile_id: CompileId,
+) -> str:
+    reason_str = get_guard_fail_reason_helper(guard_fn, f_locals, compile_id)
     guard_failures[orig_code_map[code]].append(reason_str)
 
     try:
@@ -2140,7 +2813,10 @@ def get_and_maybe_log_recompilation_reason(
     reasons = []
     while cache_entry is not None:
         reason = get_guard_fail_reason(
-            cache_entry.check_fn, cache_entry.code, frame.f_locals
+            cache_entry.check_fn,
+            cache_entry.code,
+            frame.f_locals,
+            cache_entry.compile_id,
         )
         if reason:
             reasons.append(reason)
@@ -2173,6 +2849,15 @@ def get_and_maybe_log_recompilation_reason(
                 recompiles_log.debug(message)
         if config.error_on_recompile:
             raise exc.RecompileError(message)
+
+    torch._logging.trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": "recompile_reasons",
+            "encoding": "json",
+        },
+        payload_fn=lambda: reasons,
+    )
 
     return reasons
 
@@ -2227,6 +2912,14 @@ def make_dupe_guard(obj_source, dupe_source):
     if dupe_source and dupe_source != obj_source:
         ser_source_is_local = is_from_local_source(dupe_source)
         source_is_local = is_from_local_source(obj_source)
+        if is_from_flatten_script_object_source(
+            dupe_source
+        ) or is_from_flatten_script_object_source(obj_source):
+            raise exc.UnsafeScriptObjectError(
+                f"{obj_source.name()} is alising {dupe_source.name()}. This is not supported."
+                f" Please do a clone for corresponding input."
+            )
+
         # Note - both must be local, or global, or we will run afoul of a lack of merging in how we currently
         # reconcile guards builder scopes in compile_check_fn. This technically means we miss a guard here,
         # so maybe we should do this refactor before we land this...

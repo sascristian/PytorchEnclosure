@@ -9,6 +9,8 @@ struct NoopPyInterpreterVTable final : public PyInterpreterVTable {
     return "<unloaded interpreter>";
   }
 
+  void incref(PyObject* pyobj) const override {} // do nothing
+
   void decref(PyObject* pyobj, bool has_pyobj_slot) const override {
   } // do nothing
 
@@ -34,7 +36,10 @@ struct NoopPyInterpreterVTable final : public PyInterpreterVTable {
   void python_op_registration_trampoline(
       const c10::OperatorHandle& op,
       c10::DispatchKey,
-      torch::jit::Stack* stack) const override {
+      c10::DispatchKeySet keyset,
+      torch::jit::Stack* stack,
+      bool with_keyset,
+      bool with_op) const override {
     PANIC(python_op_registration_trampoline);
   }
 

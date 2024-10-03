@@ -12,6 +12,7 @@ These backends include:
 - ``torch.backends.cpu``
 - ``torch.backends.cuda``
 - ``torch.backends.cudnn``
+- ``torch.backends.cusparselt``
 - ``torch.backends.mha``
 - ``torch.backends.mps``
 - ``torch.backends.mkl``
@@ -66,6 +67,8 @@ torch.backends.cuda
 
         Clears a cuFFT plan cache.
 
+.. autofunction:: torch.backends.cuda.preferred_blas_library
+
 .. autofunction:: torch.backends.cuda.preferred_linalg_library
 
 .. autoclass:: torch.backends.cuda.SDPAParams
@@ -82,13 +85,21 @@ torch.backends.cuda
 
 .. autofunction:: torch.backends.cuda.enable_math_sdp
 
+.. autofunction:: torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed
+
+.. autofunction:: torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp
+
 .. autofunction:: torch.backends.cuda.cudnn_sdp_enabled
 
 .. autofunction:: torch.backends.cuda.enable_cudnn_sdp
 
+.. autofunction:: torch.backends.cuda.is_flash_attention_available
+
 .. autofunction:: torch.backends.cuda.can_use_flash_attention
 
 .. autofunction:: torch.backends.cuda.can_use_efficient_attention
+
+.. autofunction:: torch.backends.cuda.can_use_cudnn_attention
 
 .. autofunction:: torch.backends.cuda.sdp_kernel
 
@@ -129,6 +140,13 @@ torch.backends.cudnn
 
 .. py:module:: torch.backends.cudnn.rnn
 
+torch.backends.cusparselt
+^^^^^^^^^^^^^^^^^^^^^^^^^
+.. automodule:: torch.backends.cusparselt
+
+.. autofunction:: torch.backends.cusparselt.version
+
+.. autofunction:: torch.backends.cusparselt.is_available
 
 torch.backends.mha
 ^^^^^^^^^^^^^^^^^^

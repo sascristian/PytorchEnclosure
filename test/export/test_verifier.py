@@ -5,11 +5,11 @@ import torch
 from functorch.experimental import control_flow
 from torch import Tensor
 from torch._dynamo.eval_frame import is_dynamo_supported
-from torch.export import export
-
 from torch._export.verifier import SpecViolationError, Verifier
+from torch.export import export
 from torch.export.exported_program import InputKind, InputSpec, TensorArgument
-from torch.testing._internal.common_utils import run_tests, TestCase, IS_WINDOWS
+from torch.testing._internal.common_utils import IS_WINDOWS, run_tests, TestCase
+
 
 @unittest.skipIf(not is_dynamo_supported(), "dynamo isn't supported")
 class TestVerifier(TestCase):
@@ -66,9 +66,7 @@ class TestVerifier(TestCase):
                 def false_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
                     return x - y
 
-                return control_flow.cond(
-                    x.shape[0] > 2, true_fn, false_fn, [x, y]
-                )
+                return control_flow.cond(x.sum() > 2, true_fn, false_fn, [x, y])
 
         f = Foo()
 
@@ -87,9 +85,7 @@ class TestVerifier(TestCase):
                 def false_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
                     return x - y
 
-                return control_flow.cond(
-                    x.shape[0] > 2, true_fn, false_fn, [x, y]
-                )
+                return control_flow.cond(x.sum() > 2, true_fn, false_fn, [x, y])
 
         f = Foo()
 
@@ -112,13 +108,15 @@ class TestVerifier(TestCase):
                 return self.linear(x)
 
         ep = export(M(), (torch.randn(10, 10),))
-        ep._validate()
+        ep.validate()
 
     def test_ep_verifier_invalid_param(self) -> None:
         class M(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
-                self.register_parameter(name="a", param=torch.nn.Parameter(torch.randn(100)))
+                self.register_parameter(
+                    name="a", param=torch.nn.Parameter(torch.randn(100))
+                )
 
             def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
                 return x + y + self.a
@@ -127,23 +125,21 @@ class TestVerifier(TestCase):
 
         # Parameter doesn't exist in the state dict
         ep.graph_signature.input_specs[0] = InputSpec(
-            kind=InputKind.PARAMETER,
-            arg=TensorArgument(name="arg0_1"),
-            target="bad_param"
+            kind=InputKind.PARAMETER, arg=TensorArgument(name="p_a"), target="bad_param"
         )
         with self.assertRaisesRegex(SpecViolationError, "not in the state dict"):
-            ep._validate()
+            ep.validate()
 
         # Add non-torch.nn.Parameter parameter to the state dict
         ep.state_dict["bad_param"] = torch.randn(100)
         with self.assertRaisesRegex(
             SpecViolationError, "not an instance of torch.nn.Parameter"
         ):
-            ep._validate()
+            ep.validate()
 
     def test_ep_verifier_invalid_buffer(self) -> None:
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.a = torch.tensor(3.0)
 
@@ -155,22 +151,22 @@ class TestVerifier(TestCase):
         # Buffer doesn't exist in the state dict
         ep.graph_signature.input_specs[0] = InputSpec(
             kind=InputKind.BUFFER,
-            arg=TensorArgument(name="arg0_1"),
+            arg=TensorArgument(name="c_a"),
             target="bad_buffer",
             persistent=True,
         )
         with self.assertRaisesRegex(SpecViolationError, "not in the state dict"):
-            ep._validate()
+            ep.validate()
 
     def test_ep_verifier_buffer_mutate(self) -> None:
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
 
                 self.my_parameter = torch.nn.Parameter(torch.tensor(2.0))
 
-                self.register_buffer("my_buffer1", torch.tensor(3.0))
-                self.register_buffer("my_buffer2", torch.tensor(4.0))
+                self.my_buffer1 = torch.nn.Buffer(torch.tensor(3.0))
+                self.my_buffer2 = torch.nn.Buffer(torch.tensor(4.0))
 
             def forward(self, x1, x2):
                 # Use the parameter, buffers, and both inputs in the forward method
@@ -183,17 +179,17 @@ class TestVerifier(TestCase):
                 return output
 
         ep = export(M(), (torch.tensor(5.0), torch.tensor(6.0)))
-        ep._validate()
+        ep.validate()
 
     def test_ep_verifier_invalid_output(self) -> None:
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
 
                 self.my_parameter = torch.nn.Parameter(torch.tensor(2.0))
 
-                self.register_buffer("my_buffer1", torch.tensor(3.0))
-                self.register_buffer("my_buffer2", torch.tensor(4.0))
+                self.my_buffer1 = torch.nn.Buffer(torch.tensor(3.0))
+                self.my_buffer2 = torch.nn.Buffer(torch.tensor(4.0))
 
             def forward(self, x1, x2):
                 # Use the parameter, buffers, and both inputs in the forward method
@@ -217,8 +213,8 @@ class TestVerifier(TestCase):
         )
 
         with self.assertRaisesRegex(SpecViolationError, "Number of output nodes"):
-            ep._validate()
+            ep.validate()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()

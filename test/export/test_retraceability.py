@@ -3,9 +3,11 @@
 try:
     from . import test_export, testing
 except ImportError:
-    import test_export
-    import testing
+    import test_export  # @manual=fbcode//caffe2/test:test_export-library
+    import testing  # @manual=fbcode//caffe2/test:test_export-library
+
 from torch.export import export
+
 
 test_classes = {}
 
@@ -21,14 +23,12 @@ def mocked_retraceability_export(*args, **kwargs):
 
 
 def make_dynamic_cls(cls):
-    suffix = "_retraceability"
-
     cls_prefix = "RetraceExport"
 
     test_class = testing.make_test_cls_with_mocked_export(
         cls,
         cls_prefix,
-        suffix,
+        test_export.RETRACEABILITY_SUFFIX,
         mocked_retraceability_export,
         xfail_prop="_expected_failure_retrace",
     )

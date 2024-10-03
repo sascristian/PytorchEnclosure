@@ -26,6 +26,11 @@ torch.fx.experimental.symbolic_shapes
     SubclassSymbolicContext
     DimConstraints
     ShapeEnvSettings
+    ConvertIntKey
+    CallMethodKey
+    PropagateUnbackedSymInts
+    DivideByKey
+    InnerTensorKey
 
     hint_int
     is_concrete_int
@@ -41,3 +46,25 @@ torch.fx.experimental.symbolic_shapes
     constrain_unify
     canonicalize_bool_expr
     statically_known_true
+    lru_cache
+    check_consistent
+    compute_unbacked_bindings
+    rebind_unbacked
+    resolve_unbacked_bindings
+    is_accessor_node
+
+torch.fx.experimental.proxy_tensor
+-------------------------------------
+
+.. currentmodule:: torch.fx.experimental.proxy_tensor
+.. automodule:: torch.fx.experimental.proxy_tensor
+
+.. autosummary::
+    :toctree: generated
+    :nosignatures:
+
+    make_fx
+    handle_sym_dispatch
+    get_proxy_mode
+    maybe_enable_thunkify
+    maybe_disable_thunkify

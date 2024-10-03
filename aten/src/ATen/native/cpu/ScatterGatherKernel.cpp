@@ -655,7 +655,7 @@ std::pair<K*, V*> radix_sort_parallel(
     const int64_t elements_count,
     const int64_t max_value) {
   TORCH_INTERNAL_ASSERT(false, "radix_sort_parallel: ATen not compiled with FBGEMM support");
-  std::make_pair(nullptr, nullptr);
+  return std::make_pair(nullptr, nullptr);
 }
 
 }
@@ -867,8 +867,8 @@ void scatter_reduce_expanded_index_kernel(
 }
 
 void gather_expanded_index_kernel(const Tensor& result, const Tensor& self, const Tensor& index) {
-  AT_DISPATCH_FLOATING_TYPES_AND(
-    ScalarType::BFloat16, self.scalar_type(), "gather_expanded_index", [&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+    ScalarType::BFloat16, ScalarType::Half, self.scalar_type(), "gather_expanded_index", [&] {
       cpu_gather_expanded_index_kernel<scalar_t>(result, index, self);
   });
 }

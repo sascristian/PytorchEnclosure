@@ -5,8 +5,8 @@
 #include <torch/csrc/utils/numpy_stub.h>
 
 #ifndef USE_NUMPY
-namespace torch {
-namespace utils {
+
+namespace torch::utils {
 PyObject* tensor_to_numpy(const at::Tensor&, bool) {
   throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
@@ -40,8 +40,8 @@ void validate_numpy_for_dlpack_deleter_bug() {}
 bool is_numpy_dlpack_deleter_bugged() {
   return false;
 }
-} // namespace utils
-} // namespace torch
+} // namespace torch::utils
+
 #else
 
 #include <torch/csrc/DynamicTypes.h>
@@ -473,14 +473,14 @@ at::Tensor tensor_from_cuda_array_interface(PyObject* obj) {
     }
   }
 
-  const auto target_device = [&]() -> c10::optional<Device> {
+  const auto target_device = [&]() -> std::optional<Device> {
     // note(crcrpar): zero-size arrays come with nullptr.
     // ref:
     // https://numba.readthedocs.io/en/stable/cuda/cuda_array_interface.html#cuda-array-interface-version-3
     if (data_ptr != nullptr) {
       return {};
     } else {
-      const auto current_device = at::detail::getCUDAHooks().current_device();
+      const auto current_device = at::detail::getCUDAHooks().getCurrentDevice();
       return Device(
           kCUDA,
           static_cast<DeviceIndex>(current_device > -1 ? current_device : 0));

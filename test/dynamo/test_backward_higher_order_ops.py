@@ -4,7 +4,6 @@
 import functools
 
 import torch
-
 import torch._dynamo.test_case
 import torch._dynamo.testing
 import torch._dynamo.utils
@@ -126,14 +125,16 @@ class _multiply_invoke(torch.nn.Module):
                 actual,
                 """\
 class GraphModule(torch.nn.Module):
-    def forward(self, s0 : torch.SymInt, L_inputs_0_ : torch.Tensor):
-        l_inputs_0_ = L_inputs_0_
+    def forward(self, L_inputs_ : list):
+        l_inputs_ = L_inputs_
 
-        new_grad = torch.clone(l_inputs_0_)
+        getitem: "f32[s0]" = l_inputs_[0];  l_inputs_ = None
 
-        result = l_inputs_0_ * l_inputs_0_;  l_inputs_0_ = None
+        new_grad: "f32[s0]" = torch.clone(getitem)
 
-        new_grad_1 = torch.clone(result);  result = None
+        result: "f32[s0]" = getitem * getitem;  getitem = None
+
+        new_grad_1: "f32[s0]" = torch.clone(result);  result = None
         return (new_grad, new_grad_1)
 """,
             )
@@ -167,7 +168,7 @@ class GraphModule(torch.nn.Module):
             y = torch.tensor([0.5, 0.5], requires_grad=True)
 
             class MyObj:
-                def __init__(self):
+                def __init__(self) -> None:
                     self.counter = 0
 
             obj = MyObj()
@@ -190,15 +191,20 @@ class GraphModule(torch.nn.Module):
                 actual,
                 """\
 class GraphModule(torch.nn.Module):
-    def forward(self, s0 : torch.SymInt, L_inputs_0_ : torch.Tensor):
-        l_inputs_0_ = L_inputs_0_
+    def forward(self, L_inputs_ : list, L_hooks_0_keywords_fn_keywords_obj_counter: "Sym(s1)"):
+        l_inputs_ = L_inputs_
+        l_hooks_0_keywords_fn_keywords_obj_counter = L_hooks_0_keywords_fn_keywords_obj_counter
 
-        new_grad = torch.clone(l_inputs_0_)
+        getitem: "f32[s0]" = l_inputs_[0];  l_inputs_ = None
 
-        result = l_inputs_0_ * l_inputs_0_;  l_inputs_0_ = None
+        new_grad: "f32[s0]" = torch.clone(getitem)
 
-        new_grad_1 = torch.clone(result);  result = None
-        return (new_grad, new_grad_1)
+        add: "Sym(s1 + 1)" = l_hooks_0_keywords_fn_keywords_obj_counter + 1;  l_hooks_0_keywords_fn_keywords_obj_counter = None
+
+        result: "f32[s0]" = getitem * getitem;  getitem = None
+
+        new_grad_1: "f32[s0]" = torch.clone(result);  result = None
+        return (new_grad, new_grad_1, add)
 """,
             )
 

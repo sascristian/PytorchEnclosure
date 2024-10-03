@@ -7,11 +7,8 @@
 #include <c10/util/Exception.h>
 #include <c10/util/irange.h>
 
-#include <array>
 #include <cmath>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <regex>
 #include <string>
 #include <tuple>
@@ -21,8 +18,7 @@
 
 using namespace torch::nn::utils::rnn;
 
-namespace torch {
-namespace nn {
+namespace torch::nn {
 
 /// These must line up with the CUDNN mode codes:
 /// https://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnRNNMode_t
@@ -157,13 +153,11 @@ void RNNImplBase<Derived>::reset() {
       }
 
       for (const auto i : c10::irange(param_names.size())) {
-        auto name = param_names[i];
-        auto param = layer_params[i];
-        this->register_parameter(name, param);
+        this->register_parameter(param_names[i], std::move(layer_params[i]));
       }
       flat_weights_names_.insert(
           flat_weights_names_.end(), param_names.begin(), param_names.end());
-      all_weights_.emplace_back(param_names);
+      all_weights_.emplace_back(std::move(param_names));
     }
   }
 
@@ -866,7 +860,7 @@ void RNNCellImplBase<Derived>::pretty_print(std::ostream& stream) const {
 template <typename Derived>
 void RNNCellImplBase<Derived>::check_forward_input(
     const Tensor& input,
-    const string name) const {
+    const string& name) const {
   TORCH_CHECK(
       input.dim() == 1 || input.dim() == 2,
       "Expected ",
@@ -897,7 +891,7 @@ RNNCellImpl::RNNCellImpl(const RNNCellOptions& options_)
           /*num_chunks=*/1)),
       options(options_) {}
 
-Tensor RNNCellImpl::forward(const Tensor& input, Tensor hx) {
+Tensor RNNCellImpl::forward(const Tensor& input, const Tensor& hx) {
   this->check_forward_input(input, "input");
   this->check_forward_input(hx, "hidden");
 
@@ -1005,7 +999,7 @@ GRUCellImpl::GRUCellImpl(const GRUCellOptions& options_)
           /*num_chunks=*/3)),
       options(options_) {}
 
-Tensor GRUCellImpl::forward(const Tensor& input, Tensor hx) {
+Tensor GRUCellImpl::forward(const Tensor& input, const Tensor& hx) {
   this->check_forward_input(input, "input");
   this->check_forward_input(hx, "hidden");
 
@@ -1031,5 +1025,4 @@ Tensor GRUCellImpl::forward(const Tensor& input, Tensor hx) {
   return ret;
 }
 
-} // namespace nn
-} // namespace torch
+} // namespace torch::nn

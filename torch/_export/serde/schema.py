@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from torch._export.serde.union import _Union
 
 # NOTE: Please update this value if any modifications are made to the schema
-SCHEMA_VERSION = (5, 2)
+SCHEMA_VERSION = (7, 4)
 TREESPEC_VERSION = 1
 
 
@@ -27,6 +27,7 @@ class ScalarType(IntEnum):
     COMPLEXDOUBLE = 11
     BOOL = 12
     BFLOAT16 = 13
+    UINT16 = 28
 
 
 class Layout(IntEnum):
@@ -215,6 +216,21 @@ class UserInputSpec:
     arg: Argument
 
 
+@dataclass(repr=False)
+class ConstantValue(_Union):
+    as_none: Tuple[()]
+    as_int: int
+    as_float: float
+    as_string: str
+    as_bool: bool
+
+
+@dataclass
+class ConstantInputSpec:
+    name: str
+    value: ConstantValue
+
+
 @dataclass
 class InputToParameterSpec:
     arg: TensorArgument
@@ -254,6 +270,7 @@ class InputSpec(_Union):
     tensor_constant: InputToTensorConstantSpec
     custom_obj: InputToCustomObjSpec
     token: InputTokenSpec
+    constant_input: ConstantInputSpec
 
 
 @dataclass
@@ -343,6 +360,7 @@ class GraphModule:
     # the modules in order to unflatten the modules back to the eager calling
     # conventions.
     module_call_graph: List[ModuleCallEntry]
+    metadata: Dict[str, str] = field(default_factory=dict)
 
 
 # Invariant: Every time a change is made to the schema, one of the versions
@@ -360,4 +378,5 @@ class ExportedProgram:
     opset_version: Dict[str, int]
     range_constraints: Dict[str, RangeConstraint]
     schema_version: SchemaVersion
-    dialect: str
+    verifiers: List[str] = field(default_factory=list)
+    torch_version: str = "<=2.4"

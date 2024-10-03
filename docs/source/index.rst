@@ -69,15 +69,18 @@ Features described in this documentation are classified by release status:
    torch.cuda.memory <torch_cuda_memory>
    mps
    xpu
+   mtia
    meta
    torch.backends <backends>
    torch.export <export>
    torch.distributed <distributed>
+   torch.distributed.tensor <distributed.tensor>
    torch.distributed.algorithms.join <distributed.algorithms.join>
    torch.distributed.elastic <distributed.elastic>
    torch.distributed.fsdp <fsdp>
-   torch.distributed.optim <distributed.optim>
    torch.distributed.tensor.parallel <distributed.tensor.parallel>
+   torch.distributed.optim <distributed.optim>
+   torch.distributed.pipelining <distributed.pipelining>
    torch.distributed.checkpoint <distributed.checkpoint>
    torch.distributions <distributions>
    torch.compiler <torch.compiler>
@@ -101,12 +104,12 @@ Features described in this documentation are classified by release status:
    optim
    complex_numbers
    ddp_comm_hooks
-   pipeline
    quantization
    rpc
    torch.random <random>
    masked
    torch.nested <nested>
+   size
    sparse
    storage
    torch.testing <testing>
@@ -122,6 +125,7 @@ Features described in this documentation are classified by release status:
    torch.utils.mobile_optimizer <mobile_optimizer>
    torch.utils.model_zoo <model_zoo>
    torch.utils.tensorboard <tensorboard>
+   torch.utils.module_tracker <module_tracker>
    type_info
    named_tensor
    name_inference

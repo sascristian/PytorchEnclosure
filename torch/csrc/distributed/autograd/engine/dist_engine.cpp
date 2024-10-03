@@ -4,14 +4,13 @@
 #include <c10/core/Event.h>
 #include <c10/util/DeadlockDetection.h>
 #include <c10/util/irange.h>
+#include <c10/util/thread_name.h>
 #include <torch/csrc/autograd/functions/accumulate_grad.h>
 #include <torch/csrc/autograd/input_buffer.h>
 #include <torch/csrc/distributed/autograd/context/container.h>
 #include <torch/csrc/distributed/autograd/engine/dist_engine.h>
 
-namespace torch {
-namespace distributed {
-namespace autograd {
+namespace torch::distributed::autograd {
 
 using torch::autograd::AccumulateGrad;
 using torch::autograd::edge_list;
@@ -76,6 +75,7 @@ class DistAccumulateGradCaptureHook
 
 void DistEngine::globalCpuThread(
     const std::shared_ptr<ReadyQueue>& ready_queue) {
+  c10::setThreadName("pt_dist_engine");
   while (true) {
     NodeTask task = ready_queue->pop();
     if (task.isShutdownTask_) {
@@ -98,7 +98,7 @@ void DistEngine::globalCpuThread(
                     InputBuffer::variables(std::move(task.inputs_))]() mutable {
       InputBuffer inputs(variables.size());
       for (const auto i : c10::irange(variables.size())) {
-        inputs.add(i, std::move(variables[i]), c10::nullopt, c10::nullopt);
+        inputs.add(i, std::move(variables[i]), std::nullopt, std::nullopt);
       }
       execute_graph_task_until_ready_queue_empty(
           /*node_task*/ NodeTask(graphTask, graphRoot, std::move(inputs)),
@@ -637,6 +637,4 @@ std::unordered_map<std::string, int> DistEngine::getDebugInfo() const {
   return debugInfo;
 }
 
-} // namespace autograd
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::autograd
